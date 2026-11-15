@@ -190,3 +190,7 @@ Debian on the Sonic Pad comes from [Jpe230/SonicPad-Debian](https://github.com/J
 Weather, air quality and place search data by [Open-Meteo.com](https://open-meteo.com/),
 licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Open-Meteo's
 free API is for non-commercial use.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
