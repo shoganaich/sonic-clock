@@ -1,4 +1,4 @@
-# Sonic Pad Weather Clock
+# Sonic Clock
 
 Turns a Creality Sonic Pad (running Debian 11) into a standalone touchscreen
 clock and weather station. It boots straight into a fullscreen dashboard, needs
