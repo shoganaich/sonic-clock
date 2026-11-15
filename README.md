@@ -244,6 +244,15 @@ This removes the service, the app and its settings. It does not re-enable
 `display-sleep` (that would turn the screen off again); the script explains how
 if you want it.
 
+## How it works
+
+The Pad has no desktop, so the app draws every screen itself: it paints a picture with
+Pillow, copies it straight to the display (`/dev/fb0`) and reads finger positions from
+the touch panel (`/dev/input/event2`) to turn them into taps and swipes. Weather is
+fetched in the background every 10 minutes.
+
+For a plain-language tour of the code, see [docs/how-it-works.md](docs/how-it-works.md).
+
 ## Project layout
 
 ```
@@ -266,9 +275,6 @@ docs/
 
 Run `python3 weatherclock.py --preview-ui <folder>` on the Pad to render every
 screen to PNG files without touching the display.
-
-New to the code? [docs/how-it-works.md](docs/how-it-works.md) explains in plain
-language how it draws the screen, reads the touch panel and keeps the weather fresh.
 
 ## Credits
 
