@@ -74,7 +74,7 @@ DEFAULTS = {
     "rotate": int(os.environ.get("CLOCK_ROTATE", "0")),
     "cc": "PT", "regions": ["Setúbal District", "Sines Municipality"],  # for official warnings
     "sea": False, "rain_alerts": True, "warnings": True,
-    "night_theme": "", "pixel_shift": True, "web": False,
+    "night_theme": "", "pixel_shift": True, "web": False, "animations": True,
 }
 NIGHT_MODES = [("bedside", "Bedside clock"), ("dim", "Dim dashboard"), ("off", "Off")]
 NIGHT_HOURS = [("sun", "Sunset to sunrise"), ("22", "22:00 to 07:00"), ("23", "23:00 to 07:00")]
@@ -383,15 +383,32 @@ def today_index(data, now):
 _icons = {}
 
 
-def icon(kind, size, day=True):
-    """Weather icon drawn 4x larger, then scaled down for smooth edges."""
+ANIM_FRAMES, ANIM_FPS = 24, 12            # weather icon animation: a 2-second loop
+_anim = {}
+
+
+def icon_frame(kind, size, day, frame):
+    """One frame of the animated weather icon (drawn once, then reused)."""
+    key = (THEME_NAME, kind, size, day, frame)
+    if key not in _anim:
+        if len(_anim) > ANIM_FRAMES * 3:  # keep only a few icons' frames in memory
+            _anim.clear()
+        _anim[key] = icon(kind, size, day, frame / ANIM_FRAMES)
+    return _anim[key]
+
+
+def icon(kind, size, day=True, phase=None):
+    """Weather icon drawn 4x larger, then scaled down for smooth edges.
+    phase 0..1 draws a moment of the animation loop; None draws the still icon."""
     key = (THEME_NAME, kind, size, day)
-    if key in _icons:
+    if phase is None and key in _icons:
         return _icons[key]
     S = size * 4
     im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     c = S / 2
+    p = phase or 0.0
+    wave = math.sin(2 * math.pi * p) if phase is not None else 0.0
 
     def circ(x, y, r, fill):
         d.ellipse((x - r, y - r, x + r, y + r), fill=fill)
@@ -402,8 +419,9 @@ def icon(kind, size, day=True):
         circ(x1, y1, w / 2, fill)
 
     def sun(x, y, r):
+        turn = p * math.pi / 4  # rays turn slowly; 8 rays, so 1/8 turn loops seamlessly
         for i in range(8):
-            a = i * math.pi / 4
+            a = i * math.pi / 4 + turn
             seg(x + math.cos(a) * r * 1.45, y + math.sin(a) * r * 1.45,
                 x + math.cos(a) * r * 1.85, y + math.sin(a) * r * 1.85, r * 0.22, SUN)
         circ(x, y, r, SUN)
@@ -411,6 +429,11 @@ def icon(kind, size, day=True):
     def moon(x, y, r):
         circ(x, y, r, MOON)
         circ(x + r * 0.55, y - r * 0.35, r * 0.85, (0, 0, 0, 0))
+        if phase is not None:  # twinkling stars
+            for k, (sx, sy, sr) in enumerate(((1.25, -0.95, 0.09), (1.55, 0.15, 0.07), (-0.35, -1.35, 0.06))):
+                glow = 0.25 + 0.75 * (0.5 + 0.5 * math.sin(2 * math.pi * (p + k / 3)))
+                circ(x + r * sx, y + r * sy, r * sr * (0.6 + 0.4 * glow),
+                     tuple(int(v * glow) for v in MOON) + (int(255 * glow),))
 
     def cloud(x, y, w, fill):
         yb = y + w * 0.25
@@ -424,37 +447,74 @@ def icon(kind, size, day=True):
     def sky(x, y, r):
         sun(x, y, r) if day else moon(x, y, r * 1.3)
 
+    drift = S * 0.03 * wave  # clouds sway gently left and right
+
+    def falling(k, n):
+        """0..1 position of falling drop/flake k of n at this moment (two falls per loop)."""
+        return (p * 2 + k / n + 0.13 * k) % 1.0
+
     if kind == "clear":
         sky(c, c, S * 0.2)
     elif kind == "partly":
         sky(c - S * 0.13, c - S * 0.13, S * 0.13)
-        cloud(c + S * 0.06, c + S * 0.12, S * 0.64, CLOUD)
+        cloud(c + S * 0.06 + drift, c + S * 0.12, S * 0.64, CLOUD)
     elif kind == "cloudy":
-        cloud(c + S * 0.13, c - S * 0.06, S * 0.5, CLOUD2)
-        cloud(c - S * 0.05, c + S * 0.1, S * 0.66, CLOUD)
+        cloud(c + S * 0.13 - drift * 0.7, c - S * 0.06, S * 0.5, CLOUD2)
+        cloud(c - S * 0.05 + drift, c + S * 0.1, S * 0.66, CLOUD)
     elif kind == "fog":
-        yb = cloud(c, c - S * 0.1, S * 0.62, CLOUD2)
+        yb = cloud(c + drift * 0.5, c - S * 0.1, S * 0.62, CLOUD2)
         for i, (a, b) in enumerate(((-0.3, 0.22), (-0.22, 0.3))):
             y = yb + S * (0.1 + 0.11 * i)
-            seg(c + S * a, y, c + S * b, y, S * 0.05, CLOUD)
+            dx = S * 0.04 * (wave if i == 0 else -wave)
+            seg(c + S * a + dx, y, c + S * b + dx, y, S * 0.05, CLOUD)
     else:
-        yb = cloud(c, c - S * 0.1, S * 0.68, CLOUD)
+        precip = []  # drawn after the cloud so it sits on top
         if kind == "rain":
-            for dx in (-0.18, 0.0, 0.18):
-                seg(c + S * dx, yb + S * 0.08, c + S * (dx - 0.06), yb + S * 0.24, S * 0.05, RAIN)
+            if phase is None:
+                precip = [("seg", c + S * dx, yb_ + S * 0.08, c + S * (dx - 0.06), yb_ + S * 0.24, S * 0.05)
+                          for dx in (-0.18, 0.0, 0.18) for yb_ in [c - S * 0.1 + S * 0.68 * 0.25]]
+            else:
+                for k, dx in enumerate((-0.2, -0.07, 0.06, 0.19)):
+                    f = falling(k, 4)
+                    y0 = c + S * (0.07 + 0.04 + 0.26 * f)
+                    x0 = c + S * dx - S * 0.375 * 0.26 * f
+                    precip.append(("seg", x0, y0, x0 - S * 0.04, y0 + S * 0.11, S * 0.045))
         elif kind == "drizzle":
-            for dx in (-0.16, 0.0, 0.16):
-                seg(c + S * dx, yb + S * 0.09, c + S * (dx - 0.03), yb + S * 0.16, S * 0.045, RAIN)
+            if phase is None:
+                precip = [("seg", c + S * dx, c + S * 0.16, c + S * (dx - 0.03), c + S * 0.23, S * 0.045)
+                          for dx in (-0.16, 0.0, 0.16)]
+            else:
+                for k, dx in enumerate((-0.18, -0.06, 0.06, 0.18)):
+                    f = falling(k, 4)
+                    y0 = c + S * (0.12 + 0.28 * f)
+                    precip.append(("seg", c + S * dx - S * 0.1 * f, y0, c + S * (dx - 0.02) - S * 0.1 * f,
+                                   y0 + S * 0.06, S * 0.04))
         elif kind == "snow":
-            for dx, dy in ((-0.18, 0.11), (0.0, 0.15), (0.18, 0.11), (-0.09, 0.27), (0.09, 0.27)):
-                circ(c + S * dx, yb + S * dy, S * 0.04, SNOW)
-        elif kind == "thunder":
+            if phase is None:
+                precip = [("dot", c + S * dx, c + S * 0.07 + S * dy, S * 0.04)
+                          for dx, dy in ((-0.18, 0.11), (0.0, 0.15), (0.18, 0.11), (-0.09, 0.27), (0.09, 0.27))]
+            else:
+                for k, dx in enumerate((-0.19, -0.09, 0.0, 0.1, 0.19)):
+                    f = (p + k / 5 + 0.11 * k) % 1.0  # snow falls slower: one fall per loop
+                    sway = S * 0.025 * math.sin(2 * math.pi * (f * 2 + k * 0.3))
+                    precip.append(("dot", c + S * dx + sway, c + S * (0.1 + 0.33 * f), S * 0.038))
+        flash = phase is not None and kind == "thunder" and (p < 0.06 or 0.12 <= p < 0.16)
+        yb = cloud(c + drift * 0.5, c - S * 0.1, S * 0.68, (255, 246, 214) if flash else CLOUD)
+        for item in precip:
+            if item[0] == "seg":
+                seg(*item[1:], RAIN)
+            else:
+                circ(item[1], item[2], item[3], SNOW)
+        if kind == "thunder" and not (phase is not None and 0.55 <= p < 0.8):  # bolt flickers off
             x, y = c - S * 0.02, yb + S * 0.04
             d.polygon([(x + S * 0.02, y), (x - S * 0.08, y + S * 0.17), (x, y + S * 0.17),
                        (x - S * 0.05, y + S * 0.33), (x + S * 0.12, y + S * 0.11),
-                       (x + S * 0.03, y + S * 0.11), (x + S * 0.09, y)], fill=BOLT)
-    _icons[key] = im.resize((size, size), Image.LANCZOS)
-    return _icons[key]
+                       (x + S * 0.03, y + S * 0.11), (x + S * 0.09, y)],
+                      fill=(255, 250, 200) if flash else BOLT)
+    small = im.resize((size, size), Image.LANCZOS)
+    if phase is None:
+        _icons[key] = small
+    return small
 
 
 def power_icon(size, color):
@@ -478,6 +538,26 @@ def power_icon(size, color):
     d.line((c, top, c, bottom), fill=color, width=int(w))
     dot(c, top)
     dot(c, bottom)
+    _icons[key] = im.resize((size, size), Image.LANCZOS)
+    return _icons[key]
+
+
+def gear_icon(size, color):
+    """Settings gear: a toothed wheel with a hole."""
+    key = ("gear", size, color)
+    if key in _icons:
+        return _icons[key]
+    S = size * 4
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    c, teeth = S / 2, 8
+    pts = []
+    for i in range(teeth * 4):
+        a = 2 * math.pi * (i + 0.5) / (teeth * 4)
+        r = S * 0.47 if i % 4 in (0, 1) else S * 0.35
+        pts.append((c + r * math.cos(a), c + r * math.sin(a)))
+    d.polygon(pts, fill=color)
+    d.ellipse((c - S * 0.15, c - S * 0.15, c + S * 0.15, c + S * 0.15), fill=(0, 0, 0, 0))
     _icons[key] = im.resize((size, size), Image.LANCZOS)
     return _icons[key]
 
@@ -771,6 +851,17 @@ class Framebuffer:
         else:
             for y in range(self.yres):
                 os.pwrite(self.fd, raw[y * row:(y + 1) * row], base + y * self.stride)
+
+    def show_region(self, img, x, y):
+        """Write a small picture at x,y without touching the rest of the screen."""
+        w, h = img.size
+        if x < 0 or y < 0 or x + w > self.xres or y + h > self.yres:
+            return
+        raw = img.convert("RGBA").tobytes("raw", self.order)
+        row = w * 4
+        for r in range(h):
+            os.pwrite(self.fd, raw[r * row:(r + 1) * row],
+                      (self.yoff + y + r) * self.stride + (self.xoff + x) * 4)
 
 
 class Backlight:
@@ -1244,7 +1335,8 @@ def settings_html(saved):
     checks = "".join("<div class=row><input type=checkbox id=%s name=%s%s><label for=%s>%s</label></div>"
                      % (k, k, " checked" if SET.get(k) else "", k, label)
                      for k, label in (("sea", "Sea conditions page"), ("rain_alerts", "Rain alerts"),
-                                      ("warnings", "Weather warnings"), ("pixel_shift", "Burn-in protection")))
+                                      ("warnings", "Weather warnings"), ("pixel_shift", "Burn-in protection"),
+                                      ("animations", "Animations")))
     return ("<h1>Sonic Clock settings</h1>%s"
             "<p>Location: <b>%s</b></p><form method=get action=/search><label>Change location</label>"
             "<input type=text name=q placeholder='Town or city'><button>Search</button></form>"
@@ -1294,7 +1386,7 @@ def apply_web_settings(f):
             SET[key] = f[key]
     if f.get("rotate") in ("0", "180"):
         SET["rotate"] = int(f["rotate"])
-    for key in ("sea", "rain_alerts", "warnings", "pixel_shift"):
+    for key in ("sea", "rain_alerts", "warnings", "pixel_shift", "animations"):
         SET[key] = f.get(key) == "on"
     save_settings()
     refresh_now.set()
@@ -1619,6 +1711,9 @@ class App:
         self.ring_until = None
         self.status_info, self.update_tag, self.update_note = [], None, ""
         self.alert_list, self.alert_source = [], ""
+        self.last_frame, self.last_shift = None, (0, 0)
+        self.anim_frame = None
+        self.slid = False             # a slide already drew the new screen
 
     # ---- drawing helpers
     def button(self, img, d, box, label, action, primary=False, size=24, fill=None):
@@ -1634,6 +1729,8 @@ class App:
         d.text((W // 2, 62), title, font=F("bold", 36), fill=TEXT, anchor="ms")
 
     def show(self, img, shift=False):
+        self.last_frame = img
+        dx = dy = 0
         if shift and SET.get("pixel_shift"):  # nudge the picture every 10 minutes against burn-in
             n = local_now()
             dx, dy = SHIFTS[(n.hour * 6 + n.minute // 10) % len(SHIFTS)]
@@ -1641,9 +1738,63 @@ class App:
                 moved = img.copy()  # uncovered edges keep the background underneath
                 moved.paste(img, (dx, dy))
                 img = moved
+        self.last_shift = (dx, dy)
         if SET["rotate"] == 180:
             img = img.rotate(180)
         self.fb.show(img)
+
+    def show_region(self, img, x, y):
+        """Redraw one small area of the last full picture (same shift and rotation)."""
+        dx, dy = self.last_shift
+        x, y = x + dx, y + dy
+        if SET["rotate"] == 180:
+            img = img.rotate(180)
+            x, y = W - x - img.size[0], H - y - img.size[1]
+        self.fb.show_region(img, x, y)
+
+    def slide_to(self, new, direction, shift=False):
+        """Slide a new screen in: direction 1 = from the right, -1 = from the left."""
+        old = self.last_frame
+        if SET.get("animations") and old is not None and old.size == new.size:
+            steps = 6
+            for i in range(1, steps):
+                off = int(W * (1 - (1 - i / steps) ** 3))  # ease out
+                frame = Image.new("RGB", (W, H))
+                if direction > 0:
+                    frame.paste(old.crop((off, 0, W, H)), (0, 0))
+                    frame.paste(new.crop((0, 0, off, H)), (W - off, 0))
+                else:
+                    frame.paste(old.crop((0, 0, W - off, H)), (off, 0))
+                    frame.paste(new.crop((W - off, 0, W, H)), (0, 0))
+                self.show(frame)
+        self.show(new, shift=shift)
+
+    def clock_key(self, now, updated, error, view, mono):
+        """Everything that changes the clock screens; a new key means redraw."""
+        tick = int(self.timer_end - mono) if view == "timers" and self.timer_end else 0
+        return (now.strftime("%Y%m%d%H%M"), updated, bool(error), view, THEME_NAME,
+                SET["place"], SET["rotate"], SET["sea"], tick, self.timer_end is not None)
+
+    def slide_view(self, direction):
+        """Show the current swipe page by sliding it in."""
+        now, mono = local_now(), time.monotonic()
+        with lock:
+            data, updated, error = state["data"], state["updated"], state["error"]
+        self.slide_to(self.render_view(now, data, updated, error), direction, shift=True)
+        self.shown = self.clock_key(now, updated, error, self.view, mono)
+        self.anim_frame = None
+
+    def animate_icon(self, data):
+        """Next frame of the dashboard's weather icon, drawn into just that area."""
+        frame = int(time.monotonic() * ANIM_FPS) % ANIM_FRAMES
+        if frame == self.anim_frame:
+            return
+        self.anim_frame = frame
+        day = is_day_now(data)
+        ic = icon_frame(wmo(data["current"]["weather_code"])[1], 176, day, frame)
+        area = background(day).crop((592, 30, 768, 206))
+        area.paste(ic, (0, 0), ic)
+        self.show_region(area, 592, 30)
 
     def views(self):
         return ["dash", "hourly"] + (["sea"] if SET["sea"] else []) + ["timers"]
@@ -1652,9 +1803,14 @@ class App:
         self.view = view
         self.shown = None
 
-    def page_dots(self, d):
+    def page_dots(self, img, d):
+        """Page dots, with a tappable Settings gear to their left (Settings is 'left' of the dashboard)."""
         vs = self.views()
         x = W // 2 - (len(vs) - 1) * 11
+        gear = gear_icon(22, MUTED)
+        gx = x - 38
+        img.paste(gear, (gx - 11, 588 - 11), gear)
+        self.buttons.append(((gx - 34, 556, gx + 24, H), lambda: self.open_settings(slide=True)))
         for v in vs:
             r = 5 if v == self.view else 4
             d.ellipse((x - r, 588 - r, x + r, 588 + r), fill=TEXT if v == self.view else DIM)
@@ -1669,7 +1825,7 @@ class App:
             img = self.render_timers()
         else:
             img = self.render_clock(now, data, updated, error)
-        self.page_dots(ImageDraw.Draw(img))
+        self.page_dots(img, ImageDraw.Draw(img))
         return img
 
     def redraw(self):
@@ -1938,17 +2094,27 @@ class App:
         return img
 
     # ---- settings
-    def open_settings(self):
+    def open_settings(self, slide=False):
         conn, _ = wifi_status()
         self.wifi_name = conn or "Not connected"
         self.settings_page = 0
         self.go("settings")
+        if slide and self.fb:  # Settings sits to the left of the dashboard
+            self.slide_to(self.render_settings(), -1)
+            self.dirty = False
+            self.slid = True
+
+    def close_settings(self):
+        self.mode = "clock"
+        if self.fb:
+            self.slide_view(1)
+            self.slid = True
 
     def render_settings(self):
         img = background(True)
         d = ImageDraw.Draw(img)
         first = self.settings_page == 0
-        self.header(img, d, "Settings", self.go_clock if first else lambda: self.set_settings_page(0))
+        self.header(img, d, "Settings", self.close_settings if first else lambda: self.set_settings_page(0))
         box = (W - M - 80, 20, W - M, 80)
         self.button(img, d, box, "", self.confirm_power)
         pic = power_icon(36, TEXT)
@@ -1977,6 +2143,7 @@ class App:
                 ("Weather warnings", onoff("warnings"), lambda: self.toggle("warnings"), "toggle:warnings"),
                 ("Burn-in protection", onoff("pixel_shift"), lambda: self.toggle("pixel_shift"),
                  "toggle:pixel_shift"),
+                ("Animations", onoff("animations"), lambda: self.toggle("animations"), "toggle:animations"),
                 ("Night theme", SET.get("night_theme") or "Off", lambda: self.open_themes("night_theme"), None),
                 ("Phone settings", ("On, PIN %s" % WEB["pin"]) if WEB["server"] else "Off",
                  self.phone_settings, None),
@@ -2517,11 +2684,14 @@ class App:
                 return
         if kind in ("swipe_l", "swipe_r"):
             self.swipe(1 if kind == "swipe_l" else -1)
-            self.dirty = True
+            self.dirty, self.slid = not self.slid, False
             return
         for (x0, y0, x1, y1), action in list(self.buttons):
             if x0 <= x <= x1 and y0 <= y <= y1:
                 action()
+                if self.slid:  # the slide already drew the new screen
+                    self.slid = self.dirty = False
+                    return
                 self.dirty = True
                 if self.mode == "clock":
                     self.shown = None
@@ -2531,7 +2701,14 @@ class App:
         if self.mode == "clock":
             vs = self.views()
             i = vs.index(self.view) if self.view in vs else 0
-            self.set_view(vs[max(0, min(len(vs) - 1, i + step))])
+            if step < 0 and i == 0:  # swipe right on the dashboard: Settings
+                self.open_settings(slide=True)
+                return
+            j = max(0, min(len(vs) - 1, i + step))
+            if j != i:
+                self.view = vs[j]
+                self.slide_view(step)
+                self.slid = True
         elif self.mode == "day":
             self.day_index += step  # clamped when drawn
         elif self.mode == "settings":
@@ -2561,11 +2738,10 @@ class App:
             night = in_night_window(now, data)
             self.sync_theme(night)
             quiet = night and SET["night_mode"] != "off" and not awake and self.mode == "clock"
+            animating = False
             if self.mode == "clock":
                 view = "bedside" if quiet and SET["night_mode"] == "bedside" else self.view
-                tick = int(self.timer_end - mono) if view == "timers" and self.timer_end else 0
-                key = (now.strftime("%Y%m%d%H%M"), updated, bool(error), view, THEME_NAME,
-                       SET["place"], SET["rotate"], SET["sea"], tick, self.timer_end is not None)
+                key = self.clock_key(now, updated, error, view, mono)
                 if key != self.shown:
                     if view == "bedside":
                         self.buttons = []
@@ -2573,6 +2749,10 @@ class App:
                     else:
                         self.show(self.render_view(now, data, updated, error), shift=True)
                     self.shown = key
+                    self.anim_frame = None
+                animating = bool(SET.get("animations") and view == "dash" and data and not quiet)
+                if animating:
+                    self.animate_icon(data)
             elif self.mode == "ring" or self.dirty:
                 self.redraw()
             level = SET["night_bright"] if quiet else SET["day_bright"]
@@ -2596,6 +2776,8 @@ class App:
                 timeout = min(timeout, max(0.05, left), 0.5 if self.view == "timers" else 60)
             if self.mode == "ring":
                 timeout = min(timeout, 0.5)
+            if animating:  # wake for the next icon frame
+                timeout = min(timeout, max(0.01, (int(mono * ANIM_FPS) + 1) / ANIM_FPS - time.monotonic()))
             try:
                 kind, x, y = events.get(timeout=timeout)
             except queue.Empty:
@@ -2709,6 +2891,15 @@ def preview_ui(folder):
     WEB["pin"] = "4821"
     app.phone_message("192.168.1.50")
     app.render_message().save(p("phone.png"))
+    # animation frames side by side, to check the icon animations (subfolder: not README screenshots)
+    os.makedirs(p("anim"), exist_ok=True)
+    for kind, day in (("partly", True), ("rain", True), ("thunder", True), ("snow", True),
+                      ("clear", False), ("fog", True)):
+        sheet = background(True).crop((0, 0, 176 * 6, 176))
+        for k, frame in enumerate(range(0, ANIM_FRAMES, ANIM_FRAMES // 6)):
+            ic = icon_frame(kind, 176, day, frame)
+            sheet.paste(ic, (176 * k, 0), ic)
+        sheet.save(p(os.path.join("anim", "%s.png" % kind)))
     print("saved previews to", folder)
 
 

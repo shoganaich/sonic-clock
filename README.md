@@ -25,6 +25,10 @@ no keyboard, mouse or desktop, and everything can be changed from the touchscree
 - Bedside night mode: a dark amber clock between sunset and sunrise (or fixed hours)
 - 16 themes, plus an optional separate night theme: Midnight, Ocean, Sunset, Forest,
   Graphite, Black, Daylight, Nord, Dracula, Solarized, Rose, Aurora, Amber, Terminal, Paper, Sky
+- Animations (can be turned off): the weather icon moves (turning sun, drifting
+  clouds, falling rain and snow, flashing thunder, twinkling stars) and pages slide
+  when you swipe. Only the icon's corner of the screen is redrawn, so it costs about
+  5% of one CPU core; animations pause in bedside mode
 - Burn-in protection: the picture shifts a few pixels every 10 minutes
 - Touchscreen settings: theme, location search, day/night brightness, night mode,
   night hours, screen rotation, Wi-Fi networks and passwords, feature switches
@@ -54,7 +58,8 @@ no keyboard, mouse or desktop, and everything can be changed from the touchscree
 
 | Do this | To |
 |---|---|
-| Hold a finger on the screen for 2 seconds, then let go | Open **Settings** (tap **More** or swipe for page 2) |
+| Swipe right on the dashboard, or tap the gear next to the page dots | Open **Settings** (tap **More** or swipe for page 2) |
+| Hold a finger on the screen for 2 seconds, then let go | Also opens Settings, from any page |
 | Swipe left or right | Switch between the dashboard, next 24 hours, sea and timer pages |
 | Tap a forecast day | See that day hour by hour (swipe for other days) |
 | Tap the detail tiles | Open the next 24 hours |
@@ -195,6 +200,7 @@ Everything normally changes from the touchscreen. Settings are stored on the Pad
 | `night_theme` | `""` (off) | Theme used during night hours |
 | `pixel_shift` | `true` | Burn-in protection |
 | `web` | `false` | Phone settings page |
+| `animations` | `true` | Animated weather icon and sliding pages |
 
 If you edit the file by hand, restart the clock: `sudo systemctl restart weatherclock`.
 
