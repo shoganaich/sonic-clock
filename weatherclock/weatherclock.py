@@ -437,6 +437,31 @@ def icon(kind, size, day=True):
     return _icons[key]
 
 
+def power_icon(size, color):
+    """The standard power symbol: a broken circle with a line through the gap."""
+    key = ("power", size, color)
+    if key in _icons:
+        return _icons[key]
+    S = size * 4
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    c, r, w = S / 2, S * 0.32, S * 0.09
+
+    def dot(x, y):
+        d.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=color)
+
+    ro = r + w / 2
+    d.arc((c - ro, c - ro + S * 0.04, c + ro, c + ro + S * 0.04), start=-60, end=240, fill=color, width=int(w))
+    for a in (-60, 240):  # round ends on the circle
+        dot(c + r * math.cos(math.radians(a)), c + S * 0.04 + r * math.sin(math.radians(a)))
+    top, bottom = c - r - S * 0.06, c + S * 0.02
+    d.line((c, top, c, bottom), fill=color, width=int(w))
+    dot(c, top)
+    dot(c, bottom)
+    _icons[key] = im.resize((size, size), Image.LANCZOS)
+    return _icons[key]
+
+
 def moon_icon(frac, size):
     """The moon as it looks tonight: lit part in MOON, dark part in DIM."""
     key = (THEME_NAME, "phase", round(frac * 60), size)
@@ -1037,7 +1062,10 @@ class App:
         img = background(True)
         d = ImageDraw.Draw(img)
         self.header(img, d, "Settings", self.go_clock)
-        self.button(img, d, (W - M - 170, 20, W - M, 80), "Power", self.confirm_power)
+        box = (W - M - 80, 20, W - M, 80)
+        self.button(img, d, box, "", self.confirm_power)
+        pic = power_icon(36, TEXT)
+        img.paste(pic, ((box[0] + box[2]) // 2 - 18, (box[1] + box[3]) // 2 - 18), pic)
         tiles = [
             ("Theme", SET["theme"], self.open_themes, None),
             ("Location", SET["place"], self.start_location, None),
