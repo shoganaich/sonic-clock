@@ -260,11 +260,15 @@ tools/
   sonicpad-diagnose.sh   read-only hardware report
 docs/
   hardware.md            what was found about the Sonic Pad's display, touch and Wi-Fi
+  how-it-works.md        plain-language tour of how the app draws, reads touch and updates
   screenshots/           rendered on the Pad with --preview-ui
 ```
 
 Run `python3 weatherclock.py --preview-ui <folder>` on the Pad to render every
 screen to PNG files without touching the display.
+
+New to the code? [docs/how-it-works.md](docs/how-it-works.md) explains in plain
+language how it draws the screen, reads the touch panel and keeps the weather fresh.
 
 ## Credits
 
