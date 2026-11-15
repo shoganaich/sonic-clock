@@ -12,35 +12,69 @@ no keyboard, mouse or desktop, and everything can be changed from the touchscree
 - Current weather: temperature, feels-like, high/low, condition and icon
 - Humidity, wind speed and direction, UV index, rain chance and rainfall
 - Air quality (European AQI), sunrise and sunset, moon phase
-- Five-day forecast
+- Five-day forecast; tap a day for its hour-by-hour detail
+- Swipe pages: next 24 hours (temperature, rain chance, wind), sea conditions, timers
+- **Weather warnings worldwide:** official warnings from
+  [MeteoAlarm](https://meteoalarm.org/) in 38 European countries and the US National
+  Weather Service in the US; elsewhere, alerts worked out from the forecast
+  (wind, heavy rain, snow, heat, cold, thunderstorms)
+- Rain alerts: "Rain in ~25 min" from 15-minute forecasts
+- Sea conditions (optional): waves, sea temperature, high and low tides
+- Kitchen timers: 5, 10, 15 and 25 minutes; the screen flashes when time is up
 - UV and air quality tiles turn orange when levels are high
 - Bedside night mode: a dark amber clock between sunset and sunrise (or fixed hours)
-- 16 themes: Midnight, Ocean, Sunset, Forest, Graphite, Black, Daylight, Nord,
-  Dracula, Solarized, Rose, Aurora, Amber, Terminal, Paper, Sky
+- 16 themes, plus an optional separate night theme: Midnight, Ocean, Sunset, Forest,
+  Graphite, Black, Daylight, Nord, Dracula, Solarized, Rose, Aurora, Amber, Terminal, Paper, Sky
+- Burn-in protection: the picture shifts a few pixels every 10 minutes
 - Touchscreen settings: theme, location search, day/night brightness, night mode,
-  night hours, screen rotation, Wi-Fi networks and passwords
+  night hours, screen rotation, Wi-Fi networks and passwords, feature switches
+- Optional phone settings page on your home network, protected by a PIN
+- Status screen and one-tap updates from this repository's GitHub Releases
 - Keeps working through network drops (shows the last weather and retries)
 - Plain Python 3 + Pillow drawing straight to the framebuffer: no X server,
   no desktop and no extra packages
 
-| Bedside night mode | Settings | Themes |
+| Next 24 hours | Sea | Timer |
 |---|---|---|
-| ![Bedside](docs/screenshots/bedside.png) | ![Settings](docs/screenshots/settings.png) | ![Themes](docs/screenshots/themes.png) |
+| ![Hourly](docs/screenshots/hourly.png) | ![Sea](docs/screenshots/sea.png) | ![Timer](docs/screenshots/timer-running.png) |
 
-| Daylight theme | Wi-Fi | Location search |
+| Warning on the dashboard | Warning details | Day detail |
 |---|---|---|
-| ![Daylight](docs/screenshots/clock-daylight.png) | ![Wi-Fi](docs/screenshots/wifi.png) | ![Places](docs/screenshots/places.png) |
+| ![Warning](docs/screenshots/clock-alerts.png) | ![Warnings](docs/screenshots/alerts.png) | ![Day](docs/screenshots/day.png) |
+
+| Bedside night mode | Settings | More settings |
+|---|---|---|
+| ![Bedside](docs/screenshots/bedside.png) | ![Settings](docs/screenshots/settings.png) | ![More settings](docs/screenshots/settings-2.png) |
+
+| Themes | Wi-Fi | Status & updates |
+|---|---|---|
+| ![Themes](docs/screenshots/themes.png) | ![Wi-Fi](docs/screenshots/wifi.png) | ![Status](docs/screenshots/status.png) |
 
 ## Using it
 
 | Do this | To |
 |---|---|
-| Hold a finger on the screen for 2 seconds, then let go | Open **Settings** |
+| Hold a finger on the screen for 2 seconds, then let go | Open **Settings** (tap **More** or swipe for page 2) |
+| Swipe left or right | Switch between the dashboard, next 24 hours, sea and timer pages |
+| Tap a forecast day | See that day hour by hour (swipe for other days) |
+| Tap the detail tiles | Open the next 24 hours |
+| Tap a warning, rain or timer badge | Open the warning details, the hours or the timer |
 | Tap the screen at night | Show the full dashboard for 30 seconds (the first tap only wakes it) |
 | Tap "Wi-Fi settings" (shown only when offline) | Go straight to the Wi-Fi list |
 | Settings → Power → Shut down or Restart | Turn the clock off or restart it safely |
 
-Settings screens return to the clock after 3 minutes without a touch.
+Settings screens and swipe pages return to the dashboard after 3 minutes without a
+touch (a running timer page stays).
+
+**Weather warnings:** a yellow, orange or red badge appears next to the place name.
+Official warnings are matched to your region (e.g. "Setúbal") by name, so pick your
+location with the in-app search. Where no official source is available, the badge
+shows alerts worked out from the forecast, and the details page says so.
+
+**Phone settings:** Settings → More → Phone settings turns on a small web page on
+port 8080. The clock shows its address and a 4-digit PIN; open it on a phone on the
+same Wi-Fi. It is off by default, works only on your home network, gets a new PIN
+every time it is turned on, and locks for a minute after 5 wrong PINs.
 
 > [!WARNING]
 > **Don't turn it off with the side button or by pulling the plug.** Debian on the
@@ -127,6 +161,20 @@ Edit the code, then run the same deploy command again. Your settings in
 Add `-Screenshots` (Windows) or `--screenshots` (Linux/macOS) to re-render every
 screen and theme on the Pad into `docs/screenshots/`.
 
+### Updating from the clock (GitHub Releases)
+
+Settings → More → Status & updates → **Check for updates** installs the newest
+[GitHub Release](../../releases) of this repository. Pads only ever get versions
+published as a Release, never unfinished work on `main`.
+
+To publish a new version:
+
+1. Set `VERSION` near the top of `weatherclock/weatherclock.py` (e.g. `"1.2.0"`) and push.
+2. Create a GitHub Release with the matching tag (`v1.2.0`).
+
+The clock downloads that release, checks the code compiles, keeps a backup of the
+old version as `weatherclock.py.bak`, installs it and restarts.
+
 ## Configuration
 
 Everything normally changes from the touchscreen. Settings are stored on the Pad in
@@ -140,6 +188,13 @@ Everything normally changes from the touchscreen. Settings are stored on the Pad
 | `night_mode` | `bedside` | `bedside`, `dim` (dashboard at night brightness) or `off` |
 | `night_hours` | `sun` | `sun` (sunset to sunrise), `22` or `23` (until 07:00) |
 | `rotate` | `0` | `0` or `180` (upside down) |
+| `cc`, `regions` | `PT`, Setúbal | Country code and region names used to match official warnings |
+| `sea` | `false` | Sea conditions page |
+| `rain_alerts` | `true` | "Rain in ~N min" badge |
+| `warnings` | `true` | Weather warnings |
+| `night_theme` | `""` (off) | Theme used during night hours |
+| `pixel_shift` | `true` | Burn-in protection |
+| `web` | `false` | Phone settings page |
 
 If you edit the file by hand, restart the clock: `sudo systemctl restart weatherclock`.
 
@@ -179,7 +234,8 @@ if you want it.
 
 ```
 weatherclock/
-  weatherclock.py        the app (dashboard, bedside clock, settings, Wi-Fi, keyboard)
+  weatherclock.py        the whole app: screens, weather, warnings, Wi-Fi, timers,
+                         phone settings page and updater
   weatherclock.service   systemd unit
   install.sh             installs on the Pad (run by the deploy scripts)
   uninstall.sh           removes it from the Pad
@@ -200,9 +256,12 @@ screen to PNG files without touching the display.
 
 Debian on the Sonic Pad comes from [Jpe230/SonicPad-Debian](https://github.com/Jpe230/SonicPad-Debian).
 
-Weather, air quality and place search data by [Open-Meteo.com](https://open-meteo.com/),
+Weather, air quality, marine and place search data by [Open-Meteo.com](https://open-meteo.com/),
 licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Open-Meteo's
-free API is for non-commercial use.
+free API is for non-commercial use. Sea and tide data are model estimates, not for navigation.
+
+Official weather warnings from [MeteoAlarm](https://meteoalarm.org/) (EUMETNET and the
+national weather services) and the [US National Weather Service](https://www.weather.gov/).
 
 ## License
 

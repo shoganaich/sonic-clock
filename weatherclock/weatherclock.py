@@ -11,18 +11,28 @@ Open-Meteo.
 Hold a finger on the screen for 2 seconds to open Settings.
 """
 
+import hmac
+import html
+import io
 import json
 import math
 import os
 import queue
+import re
+import secrets
+import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import threading
 import time
+import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -40,6 +50,13 @@ REFRESH_OK, REFRESH_FAIL = 600, 60         # seconds between weather fetches
 TOUCH_SWAP_XY = os.environ.get("CLOCK_TOUCH_SWAP_XY") == "1"
 TOUCH_INVERT_X = os.environ.get("CLOCK_TOUCH_INVERT_X") == "1"
 TOUCH_INVERT_Y = os.environ.get("CLOCK_TOUCH_INVERT_Y") == "1"
+VERSION = "1.1.0"                          # bump together with the GitHub Release tag (v1.1.0)
+UPDATE_REPO = "shoganaich/sonic-clock"     # GitHub repo whose Releases the Pad can install
+WEB_PORT = 8080                            # phone settings page (only while turned on)
+SWIPE_MIN = 120                            # pixels a finger must travel to count as a swipe
+TIMER_CHOICES = (5, 10, 15, 25)            # minutes
+RING_SECS = 120                            # how long a finished timer flashes
+SHIFTS = [(0, 0), (3, 0), (3, 3), (0, 3), (-3, 3), (-3, 0), (-3, -3), (0, -3), (3, -3)]
 
 
 def log(*a):
@@ -55,6 +72,9 @@ DEFAULTS = {
     "day_bright": 100, "night_bright": 35,
     "night_mode": "bedside", "night_hours": "sun",
     "rotate": int(os.environ.get("CLOCK_ROTATE", "0")),
+    "cc": "PT", "regions": ["Setúbal District", "Sines Municipality"],  # for official warnings
+    "sea": False, "rain_alerts": True, "warnings": True,
+    "night_theme": "", "pixel_shift": True, "web": False,
 }
 NIGHT_MODES = [("bedside", "Bedside clock"), ("dim", "Dim dashboard"), ("off", "Off")]
 NIGHT_HOURS = [("sun", "Sunset to sunrise"), ("22", "22:00 to 07:00"), ("23", "23:00 to 07:00")]
@@ -658,6 +678,69 @@ def render_bedside(now, data):
     return img
 
 
+TEMP_LINE = (255, 170, 60)
+
+
+def is_day_now(data):
+    return bool(data["current"].get("is_day", 1)) if data else True
+
+
+def hour_index(data, when):
+    try:
+        return data["hourly"]["time"].index(when.strftime("%Y-%m-%dT%H:00"))
+    except (KeyError, ValueError):
+        return None
+
+
+def draw_hours(img, d, data, start, count, top):
+    """Hour-by-hour chart: times and icons, temperature line, rain chance bars, wind."""
+    hr = data["hourly"]
+    n = min(count, len(hr["time"]) - start)
+    if n < 2:
+        return
+    x0, x1 = M + 8, W - M - 8
+    cw = (x1 - x0) / n
+    temps = [hr["temperature_2m"][start + i] for i in range(n)]
+    valid = [t for t in temps if t is not None] or [0]
+    lo, hi = min(valid), max(valid)
+    if hi - lo < 4:
+        lo, hi = (hi + lo) / 2 - 2, (hi + lo) / 2 + 2
+    ty0, ty1 = top + 100, top + 216          # temperature line
+    ry0, ry1 = top + 262, top + 348          # rain chance bars
+    wy = top + 404                           # wind speeds
+    d.text((x0, ry0 - 18), "Rain chance", font=F("reg", 16), fill=MUTED, anchor="ls")
+    d.text((x0, wy - 28), "Wind km/h", font=F("reg", 16), fill=MUTED, anchor="ls")
+    d.line((x0, ry1, x1, ry1), fill=DIM, width=1)
+    points = []
+    for i in range(n):
+        k = start + i
+        when = datetime.fromisoformat(hr["time"][k])
+        x = x0 + cw * (i + 0.5)
+        if when.hour == 0 and i > 0:  # midnight: mark the new day
+            bx = int(x - cw / 2)
+            d.line((bx, top + 62, bx, wy + 8), fill=DIM, width=1)
+            d.text((bx + 6, top + 76), when.strftime("%a"), font=F("bold", 15), fill=MUTED, anchor="ls")
+        p = hr["precipitation_probability"][k] or 0
+        bar = (ry1 - ry0) * p / 100.0
+        if p > 0:
+            d.rectangle((x - cw * 0.3, ry1 - bar, x + cw * 0.3, ry1), fill=RAIN)
+        if i % 3 == 0:
+            d.text((x, top + 16), when.strftime("%H:%M"), font=F("bold", 17), fill=TEXT, anchor="ms")
+            ic = icon(wmo(hr["weather_code"][k])[1], 40, bool(hr["is_day"][k]))
+            img.paste(ic, (int(x) - 20, top + 22), ic)
+            if p >= 10:
+                d.text((x, ry1 - bar - 6), "%d%%" % p, font=F("bold", 15), fill=RAIN, anchor="ms")
+            d.text((x, wy), "%d" % round(hr["wind_speed_10m"][k] or 0), font=F("bold", 18), fill=TEXT, anchor="ms")
+        if temps[i] is not None:
+            points.append((i, x, ty1 - (temps[i] - lo) / (hi - lo) * (ty1 - ty0), temps[i]))
+    if len(points) > 1:
+        d.line([(x, y) for _, x, y, _ in points], fill=TEMP_LINE, width=4, joint="curve")
+    for i, x, y, t in points:
+        if i % 3 == 0:
+            d.ellipse((x - 5, y - 5, x + 5, y + 5), fill=TEMP_LINE)
+            d.text((x, y - 12), "%d°" % round(t), font=F("bold", 18), fill=TEXT, anchor="ms")
+
+
 # ---------------------------------------------------------------- hardware
 class Framebuffer:
     def __init__(self, path=FB_DEV):
@@ -730,8 +813,20 @@ def weather_url():
     return ("https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
             "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,"
             "precipitation,weather_code,wind_speed_10m,wind_direction_10m"
+            "&hourly=temperature_2m,precipitation_probability,precipitation,weather_code,"
+            "wind_speed_10m,wind_gusts_10m,is_day"
             "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,"
-            "uv_index_max,precipitation_probability_max&forecast_days=7&timezone=%s"
+            "uv_index_max,precipitation_probability_max,precipitation_sum,snowfall_sum,"
+            "wind_gusts_10m_max"
+            "&minutely_15=precipitation&forecast_minutely_15=8"
+            "&forecast_days=7&timezone=%s"
+            % (SET["lat"], SET["lon"], urllib.parse.quote(SET["tz"], safe="")))
+
+
+def marine_url():
+    return ("https://marine-api.open-meteo.com/v1/marine?latitude=%.4f&longitude=%.4f"
+            "&current=wave_height,wave_direction,wave_period,sea_surface_temperature"
+            "&hourly=wave_height,sea_level_height_msl&forecast_days=3&timezone=%s"
             % (SET["lat"], SET["lon"], urllib.parse.quote(SET["tz"], safe="")))
 
 
@@ -748,7 +843,199 @@ def fetch_all():
     except Exception as e:  # air quality is optional
         log("air quality fetch failed:", e)
         data["air"] = None
+    data["sea"] = None
+    if SET["sea"]:
+        try:
+            data["sea"] = fetch(marine_url())
+        except Exception as e:
+            log("sea data fetch failed:", e)
+    data["alerts"], data["alerts_source"] = None, ""  # None: use forecast-based alerts
+    if SET["warnings"]:
+        try:
+            data["alerts"], data["alerts_source"] = official_alerts()
+        except Exception as e:
+            log("warnings fetch failed, using forecast-based alerts:", e)
     return data
+
+
+# ---------------------------------------------------------------- weather warnings
+# Official warnings where a free source exists, forecast-based alerts everywhere else.
+METEOALARM = {
+    "AT": "austria", "BA": "bosnia-herzegovina", "BE": "belgium", "BG": "bulgaria",
+    "CH": "switzerland", "CY": "cyprus", "CZ": "czechia", "DE": "germany", "DK": "denmark",
+    "EE": "estonia", "ES": "spain", "FI": "finland", "FR": "france", "GB": "united-kingdom",
+    "GR": "greece", "HR": "croatia", "HU": "hungary", "IE": "ireland", "IL": "israel",
+    "IS": "iceland", "IT": "italy", "LT": "lithuania", "LU": "luxembourg", "LV": "latvia",
+    "MD": "moldova", "ME": "montenegro", "MK": "republic-of-north-macedonia", "MT": "malta",
+    "NL": "netherlands", "NO": "norway", "PL": "poland", "PT": "portugal", "RO": "romania",
+    "RS": "serbia", "SE": "sweden", "SI": "slovenia", "SK": "slovakia", "UA": "ukraine",
+}
+ALERT_COLORS = {2: (242, 200, 46), 3: (245, 136, 34), 4: (222, 52, 44)}  # yellow, orange, red
+REGION_STOP = {"district", "distrito", "de", "do", "da", "dos", "das", "province", "provincia",
+               "region", "regiao", "county", "municipality", "municipio", "concelho", "state",
+               "department", "departement", "kreis", "landkreis", "city", "of", "the"}
+
+
+def region_words(name):
+    s = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode().lower()
+    return [w for w in re.findall(r"[a-z0-9]+", s) if w not in REGION_STOP]
+
+
+def area_matches(area):
+    """Does a warning area ("Setúbal") match the chosen place's regions ("Setúbal District")?"""
+    words = region_words(area)
+    return bool(words) and any(region_words(r) == words for r in SET.get("regions") or [])
+
+
+def to_local(iso):
+    """ISO time with an offset -> naive local time at the chosen place."""
+    if not iso:
+        return None
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        return t
+    try:
+        from zoneinfo import ZoneInfo
+        return t.astimezone(ZoneInfo(SET["tz"])).replace(tzinfo=None)
+    except Exception:
+        return t.astimezone().replace(tzinfo=None)
+
+
+def official_alerts():
+    """(alerts, source name), or (None, "") where no official source is available."""
+    cc = (SET.get("cc") or "").upper()
+    found = []
+    if cc in METEOALARM:
+        source = "MeteoAlarm"
+        feed = fetch("https://feeds.meteoalarm.org/api/v1/warnings/feeds-" + METEOALARM[cc])
+        for w in feed.get("warnings") or []:
+            infos = (w.get("alert") or {}).get("info") or []
+            if not infos:
+                continue
+            info = next((i for i in infos if (i.get("language") or "").lower().startswith("en")), infos[0])
+            if not any(area_matches(a.get("areaDesc")) for a in info.get("area") or []):
+                continue
+            level = 0
+            for p in info.get("parameter") or []:
+                if p.get("valueName") == "awareness_level":
+                    try:
+                        level = int(str(p.get("value")).split(";")[0])
+                    except ValueError:
+                        pass
+            if level >= 2:  # 1 is green: no warning
+                found.append({"level": min(level, 4), "title": info.get("event") or "Weather warning",
+                              "detail": info.get("description") or info.get("headline") or "",
+                              "start": to_local(info.get("onset") or info.get("effective")),
+                              "end": to_local(info.get("expires"))})
+    elif cc == "US":
+        source = "US National Weather Service"
+        feed = fetch("https://api.weather.gov/alerts/active?point=%.4f,%.4f" % (SET["lat"], SET["lon"]))
+        levels = {"severe": 3, "extreme": 4}
+        for f in feed.get("features") or []:
+            p = f.get("properties") or {}
+            found.append({"level": levels.get((p.get("severity") or "").lower(), 2),
+                          "title": p.get("event") or "Weather alert",
+                          "detail": p.get("headline") or p.get("description") or "",
+                          "start": to_local(p.get("onset") or p.get("effective")),
+                          "end": to_local(p.get("ends") or p.get("expires"))})
+    else:
+        return None, ""
+    now = local_now()
+    keep, seen = [], set()
+    for a in sorted(found, key=lambda a: (-a["level"], a["start"] or now)):
+        if a["end"] and a["end"] < now:
+            continue
+        if a["start"] and a["start"] > now + timedelta(days=2):
+            continue
+        if (a["title"], a["start"]) in seen:
+            continue
+        seen.add((a["title"], a["start"]))
+        keep.append(a)
+    return keep, source
+
+
+def forecast_alerts(data, now):
+    """Alerts worked out from the forecast, for places without an official source."""
+    dl = data["daily"]
+    t = today_index(data, now)
+    out = []
+
+    def level(v, steps):  # steps for yellow, orange, red
+        return 1 + sum(1 for s in steps if v is not None and v >= s)
+
+    def add(lv, title, detail):
+        if lv >= 2 and not any(a["title"] == title for a in out):
+            out.append({"level": lv, "title": title, "detail": detail, "start": None, "end": None})
+
+    for i, when in ((t, "today"), (t + 1, "tomorrow")):
+        if i >= len(dl["time"]):
+            break
+        get = lambda k: (dl.get(k) or [None] * (i + 1))[i]
+        gust, rain, snow = get("wind_gusts_10m_max"), get("precipitation_sum"), get("snowfall_sum")
+        hi, lo, code = get("temperature_2m_max"), get("temperature_2m_min"), get("weather_code")
+        add(level(gust, (70, 90, 110)), "Strong wind", "Gusts up to %d km/h %s." % (round(gust or 0), when))
+        add(level(rain, (30, 60, 100)), "Heavy rain", "About %d mm of rain %s." % (round(rain or 0), when))
+        add(level(snow, (2, 10, 25)), "Snow", "About %d cm of snow %s." % (round(snow or 0), when))
+        add(level(hi, (35, 38, 42)), "Heat", "Up to %d° %s." % (round(hi or 0), when))
+        add(level(-lo if lo is not None else None, (5, 10, 20)), "Severe cold",
+            "Down to %d° %s." % (round(lo or 0), when))
+        if code in (95, 96, 99):
+            add(3 if code in (96, 99) else 2, "Thunderstorms", "Thunderstorms expected %s." % when)
+    return sorted(out, key=lambda a: -a["level"])
+
+
+def active_alerts(data, now):
+    if not data or not SET["warnings"]:
+        return [], ""
+    if data.get("alerts") is not None:
+        return data["alerts"], data.get("alerts_source") or ""
+    return forecast_alerts(data, now), "Forecast-based (no official warnings available here)"
+
+
+def alert_when(a, now):
+    def f(t):
+        return t.strftime("%H:%M") if t.date() == now.date() else t.strftime("%a %H:%M")
+    s, e = a.get("start"), a.get("end")
+    if s and s > now:
+        return "from %s" % f(s) + (" to %s" % f(e) if e else "")
+    return "until %s" % f(e) if e else ""
+
+
+def rain_soon(data, now):
+    """Minutes until rain starts within the next 2 hours, or None."""
+    if not data or not SET["rain_alerts"]:
+        return None
+    if (data["current"].get("precipitation") or 0) > 0:
+        return None
+    m = data.get("minutely_15") or {}
+    for ts, p in zip(m.get("time") or [], m.get("precipitation") or []):
+        t = datetime.fromisoformat(ts)
+        if t > now and (p or 0) >= 0.1:
+            return max(5, int(round((t - now).total_seconds() / 300.0)) * 5)
+    return None
+
+
+def tides(sea, now, hours=30):
+    """[(High|Low, time, metres)] from the hourly sea level, interpolated between hours."""
+    h = (sea or {}).get("hourly") or {}
+    times, lv = h.get("time") or [], h.get("sea_level_height_msl") or []
+    out = []
+    for i in range(1, len(lv) - 1):
+        a, b, c = lv[i - 1], lv[i], lv[i + 1]
+        if None in (a, b, c):
+            continue
+        kind = "High" if b > a and b >= c else "Low" if b < a and b <= c else None
+        if not kind:
+            continue
+        curve = a - 2 * b + c
+        off = 0.5 * (a - c) / curve if curve else 0.0
+        t = datetime.fromisoformat(times[i]) + timedelta(hours=off)
+        if now - timedelta(minutes=30) <= t <= now + timedelta(hours=hours):
+            out.append((kind, t, b))
+    return out
 
 
 def weather_loop():
@@ -789,8 +1076,320 @@ def geocode(query):
             continue
         seen.add(label)
         out.append({"name": r.get("name", "?"), "country": r.get("country", ""), "label": label,
-                    "lat": r["latitude"], "lon": r["longitude"], "tz": r.get("timezone") or "auto"})
+                    "lat": r["latitude"], "lon": r["longitude"], "tz": r.get("timezone") or "auto",
+                    "cc": r.get("country_code") or "",
+                    "regions": [r[k] for k in ("admin1", "admin2", "admin3", "admin4") if r.get(k)]})
     return out[:5]
+
+
+def set_place(p):
+    SET.update(place="%s, %s" % (p["name"], p["country"]) if p.get("country") else p["name"],
+               lat=p["lat"], lon=p["lon"], tz=p["tz"], cc=p.get("cc") or "",
+               regions=p.get("regions") or [])
+    save_settings()
+    with lock:
+        state.update(data=None, updated=None, error=None)
+    refresh_now.set()
+    log("location set to", SET["place"])
+
+
+# ---------------------------------------------------------------- status and updates
+def system_status():
+    """[(label, value)] for the Status screen."""
+    def safe(fn):
+        try:
+            return fn()
+        except Exception:
+            return "--"
+
+    conn, ip = wifi_status()
+    signal = ""
+    _, out, _ = nm("-t", "-f", "IN-USE,SIGNAL", "device", "wifi")
+    for line in out.splitlines():
+        p = split_terse(line)
+        if len(p) >= 2 and p[0] == "*":
+            signal = " (%s%%)" % p[1]
+
+    def uptime():
+        s = int(float(open("/proc/uptime").read().split()[0]))
+        d, h, m = s // 86400, s // 3600 % 24, s // 60 % 60
+        return ("%d d %d h" % (d, h)) if d else ("%d h %d min" % (h, m))
+
+    def storage():
+        st = os.statvfs("/")
+        return "%.1f GB free of %.1f GB" % (st.f_bavail * st.f_frsize / 1e9, st.f_blocks * st.f_frsize / 1e9)
+
+    def memory():
+        info = dict(l.split(":", 1) for l in open("/proc/meminfo").read().splitlines() if ":" in l)
+        kb = lambda k: int(info[k].split()[0])
+        return "%d MB free of %d MB" % (kb("MemAvailable") // 1024, kb("MemTotal") // 1024)
+
+    def cpu_temp():
+        return "%d°C" % round(int(open("/sys/class/thermal/thermal_zone0/temp").read()) / 1000)
+
+    with lock:
+        upd, err = state["updated"], state["error"]
+    return [("Version", VERSION), ("IP address", ip or "None"),
+            ("Wi-Fi", (conn + signal) if conn else "Not connected"), ("Uptime", safe(uptime)),
+            ("Storage", safe(storage)), ("Memory", safe(memory)), ("CPU temperature", safe(cpu_temp)),
+            ("Weather updated", (upd.strftime("%H:%M") + (" (offline)" if err else "")) if upd else "Not yet")]
+
+
+def version_tuple(v):
+    return tuple(int(n) for n in re.findall(r"\d+", v or "")[:3])
+
+
+def latest_release():
+    """Tag of the newest GitHub Release (raises HTTPError 404 if none is published)."""
+    return fetch("https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO)["tag_name"]
+
+
+def write_atomic(path, data, mode):
+    tmp = path + ".new"
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def install_release(tag):
+    """Download a release from GitHub and install its app and service files."""
+    url = "https://codeload.github.com/%s/tar.gz/refs/tags/%s" % (UPDATE_REPO, urllib.parse.quote(tag))
+    req = urllib.request.Request(url, headers={"User-Agent": "sonicpad-weather-clock"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        raw = r.read(50 * 1024 * 1024)
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+        for m in tar.getmembers():  # only read the two files we need, never extract the archive
+            parts = m.name.split("/")
+            if m.isfile() and len(parts) == 3 and parts[1] == "weatherclock" \
+                    and parts[2] in ("weatherclock.py", "weatherclock.service"):
+                files[parts[2]] = tar.extractfile(m).read()
+    code = files.get("weatherclock.py")
+    if not code:
+        raise RuntimeError("weatherclock.py is missing from release %s" % tag)
+    compile(code, "weatherclock.py", "exec")  # refuse a broken file
+    here = os.path.abspath(__file__)
+    shutil.copy2(here, here + ".bak")
+    write_atomic(here, code, 0o755)
+    unit = "/etc/systemd/system/weatherclock.service"
+    svc = files.get("weatherclock.service")
+    if svc:
+        try:
+            with open(unit, "rb") as f:
+                old = f.read()
+        except OSError:
+            old = None
+        if svc != old:
+            write_atomic(unit, svc, 0o644)
+            subprocess.run(["systemctl", "daemon-reload"], timeout=30)
+    os.sync()
+    log("installed release", tag)
+
+
+# ---------------------------------------------------------------- phone settings page
+WEB = {"server": None, "pin": "", "tokens": set(), "fails": 0, "locked_until": 0.0}
+WEB_CSS = ("body{font-family:system-ui,sans-serif;background:#10141f;color:#eef1f7;margin:0 auto;"
+           "padding:16px;max-width:560px}h1{font-size:22px}label{display:block;margin:14px 0 4px;"
+           "color:#8c96aa}select,input[type=number],input[type=text],input[type=password]{width:100%;"
+           "font-size:18px;padding:10px;border-radius:10px;border:1px solid #2e374e;background:#1c2334;"
+           "color:#eef1f7;box-sizing:border-box}.row{display:flex;align-items:center;gap:10px;margin:12px 0}"
+           ".row input{width:24px;height:24px}button{margin-top:16px;width:100%;font-size:18px;padding:12px;"
+           "border:0;border-radius:10px;background:#2c6cdc;color:#fff}.msg{padding:10px;border-radius:10px;"
+           "background:#1d4d2c}.err{background:#5c2422}a{color:#6aa5ff}")
+
+
+def web_start():
+    if WEB["server"]:
+        return
+    srv = ThreadingHTTPServer(("0.0.0.0", WEB_PORT), WebHandler)
+    srv.daemon_threads = True
+    WEB.update(server=srv, pin="%04d" % secrets.randbelow(10000), tokens=set(), fails=0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log("phone settings page on port", WEB_PORT)
+
+
+def web_stop():
+    srv = WEB["server"]
+    WEB.update(server=None, tokens=set())
+    if srv:
+        srv.shutdown()
+        srv.server_close()
+
+
+def page_html(body):
+    return ("<!doctype html><html><head><meta charset=utf-8><meta name=viewport "
+            "content='width=device-width,initial-scale=1'><title>Sonic Clock</title>"
+            "<style>%s</style></head><body>%s</body></html>" % (WEB_CSS, body))
+
+
+def login_html(error):
+    err = "<p class='msg err'>%s</p>" % html.escape(error) if error else ""
+    return ("<h1>Sonic Clock</h1>%s<form method=post action=/login><label>PIN shown on the clock "
+            "(Settings, Phone settings)</label><input type=password name=pin inputmode=numeric "
+            "autocomplete=off autofocus><button>Open settings</button></form>" % err)
+
+
+def select_html(name, options, current):
+    opts = "".join("<option value='%s'%s>%s</option>" % (html.escape(str(v)), " selected" if v == current else "",
+                                                         html.escape(label)) for v, label in options)
+    return "<select name=%s>%s</select>" % (name, opts)
+
+
+def settings_html(saved):
+    e = html.escape
+    themes = [(t, t) for t in THEME_ORDER]
+    checks = "".join("<div class=row><input type=checkbox id=%s name=%s%s><label for=%s>%s</label></div>"
+                     % (k, k, " checked" if SET.get(k) else "", k, label)
+                     for k, label in (("sea", "Sea conditions page"), ("rain_alerts", "Rain alerts"),
+                                      ("warnings", "Weather warnings"), ("pixel_shift", "Burn-in protection")))
+    return ("<h1>Sonic Clock settings</h1>%s"
+            "<p>Location: <b>%s</b></p><form method=get action=/search><label>Change location</label>"
+            "<input type=text name=q placeholder='Town or city'><button>Search</button></form>"
+            "<form method=post action=/save>"
+            "<label>Theme</label>%s<label>Night theme</label>%s"
+            "<label>Day brightness (10-100)</label><input type=number name=day_bright min=10 max=100 step=5 value=%d>"
+            "<label>Night brightness (5-100)</label><input type=number name=night_bright min=5 max=100 step=5 value=%d>"
+            "<label>Night mode</label>%s<label>Night hours</label>%s<label>Screen rotation</label>%s"
+            "%s<button>Save</button></form>"
+            % ("<p class=msg>Saved.</p>" if saved else "", e(SET["place"]),
+               select_html("theme", themes, SET["theme"]),
+               select_html("night_theme", [("", "Off")] + themes, SET.get("night_theme") or ""),
+               SET["day_bright"], SET["night_bright"],
+               select_html("night_mode", NIGHT_MODES, SET["night_mode"]),
+               select_html("night_hours", NIGHT_HOURS, SET["night_hours"]),
+               select_html("rotate", [(str(v), l) for v, l in ROTATIONS], str(SET["rotate"])), checks))
+
+
+def search_html(query):
+    e = html.escape
+    try:
+        places = geocode(query) if len(query.strip()) >= 2 else []
+    except Exception:
+        return "<p class='msg err'>Search failed. Check the clock's internet connection.</p><a href=/>Back</a>"
+    if not places:
+        return "<p class='msg err'>No places found for %s.</p><a href=/>Back</a>" % e(query)
+    rows = []
+    for p in places:
+        hidden = "".join("<input type=hidden name=%s value='%s'>" % (k, e(str(p[k])))
+                         for k in ("name", "country", "lat", "lon", "tz", "cc"))
+        hidden += "<input type=hidden name=regions value='%s'>" % e("|".join(p["regions"]))
+        rows.append("<form method=post action=/place>%s<button>%s</button></form>" % (hidden, e(p["label"])))
+    return "<h1>Choose a place</h1>%s<p><a href=/>Back</a></p>" % "".join(rows)
+
+
+def apply_web_settings(f):
+    if f.get("theme") in THEMES:
+        SET["theme"] = f["theme"]
+    SET["night_theme"] = f.get("night_theme") if f.get("night_theme") in THEMES else ""
+    for key, lo in (("day_bright", 10), ("night_bright", 5)):
+        try:
+            SET[key] = max(lo, min(100, int(f.get(key, SET[key]))))
+        except ValueError:
+            pass
+    for key, opts in (("night_mode", NIGHT_MODES), ("night_hours", NIGHT_HOURS)):
+        if f.get(key) in [v for v, _ in opts]:
+            SET[key] = f[key]
+    if f.get("rotate") in ("0", "180"):
+        SET["rotate"] = int(f["rotate"])
+    for key in ("sea", "rain_alerts", "warnings", "pixel_shift"):
+        SET[key] = f.get(key) == "on"
+    save_settings()
+    refresh_now.set()
+
+
+def apply_web_place(f):
+    try:
+        lat, lon = float(f["lat"]), float(f["lon"])
+    except (KeyError, ValueError):
+        return
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return
+    tz = f.get("tz") or "auto"
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz)
+    except Exception:
+        tz = "auto"
+    cc = f.get("cc", "")
+    set_place({"name": f.get("name", "?")[:60], "country": f.get("country", "")[:60], "lat": lat, "lon": lon,
+               "tz": tz, "cc": cc.upper() if re.fullmatch(r"[A-Za-z]{2}", cc) else "",
+               "regions": [r[:80] for r in f.get("regions", "").split("|") if r][:4]})
+
+
+class WebHandler(BaseHTTPRequestHandler):
+    server_version = "SonicClock"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def authed(self):
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "sc" and v in WEB["tokens"]:
+                return True
+        return False
+
+    def form(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > 20000:
+            return {}
+        body = self.rfile.read(n).decode("utf-8", "replace")
+        return {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
+
+    def send_page(self, body):
+        data = page_html(body).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def redirect(self, where, cookie=None):
+        self.send_response(303)
+        self.send_header("Location", where)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self):
+        url = urllib.parse.urlparse(self.path)
+        if not self.authed():
+            return self.send_page(login_html(""))
+        q = urllib.parse.parse_qs(url.query)
+        if url.path == "/search":
+            return self.send_page(search_html(q.get("q", [""])[0]))
+        self.send_page(settings_html("saved" in q))
+
+    def do_POST(self):
+        url = urllib.parse.urlparse(self.path)
+        f = self.form()
+        if url.path == "/login":
+            now = time.monotonic()
+            if now < WEB["locked_until"]:
+                return self.send_page(login_html("Too many wrong PINs. Wait a minute and try again."))
+            if hmac.compare_digest(f.get("pin", "").encode(), WEB["pin"].encode()):
+                token = secrets.token_urlsafe(24)
+                WEB["tokens"].add(token)
+                WEB["fails"] = 0
+                return self.redirect("/", "sc=%s; Path=/; HttpOnly; SameSite=Strict" % token)
+            WEB["fails"] += 1
+            if WEB["fails"] >= 5:
+                WEB.update(fails=0, locked_until=now + 60)
+            return self.send_page(login_html("Wrong PIN."))
+        if not self.authed():
+            return self.redirect("/")
+        if url.path == "/save":
+            apply_web_settings(f)
+        elif url.path == "/place":
+            apply_web_place(f)
+        events.put(("web", 0, 0))
+        self.redirect("/?saved=1")
 
 
 def is_night(now, data):
@@ -877,8 +1476,13 @@ def touch_loop():
                         last_touch[0] = t0
                     elif was and not down:
                         px, py = to_screen(sx, sy, rx, ry)
+                        ex, ey = to_screen(x, y, rx, ry)
                         held = time.monotonic() - t0
-                        events.put(("long" if held >= LONG_PRESS else "tap", px, py))
+                        dx, dy = ex - px, ey - py
+                        if abs(dx) >= SWIPE_MIN and abs(dx) > 2 * abs(dy) and held < 1.5:
+                            events.put(("swipe_l" if dx < 0 else "swipe_r", px, py))
+                        else:
+                            events.put(("long" if held >= LONG_PRESS else "tap", px, py))
                     was = down
         except OSError as e:
             log("touch read error:", e)
@@ -1006,6 +1610,15 @@ class App:
         self.kb = {}
         self.text, self.layer, self.show_pw, self.note = "", "lower", True, ""
         self.msg = ("", "", [])
+        self.view = "dash"            # swipe pages: dash, hourly, sea, timers
+        self.settings_page = 0
+        self.theme_target = "theme"   # or "night_theme"
+        self.day_index = 0
+        self.timer_end = None         # monotonic time the timer finishes
+        self.timer_wall = None        # clock time it finishes, for display
+        self.ring_until = None
+        self.status_info, self.update_tag, self.update_note = [], None, ""
+        self.alert_list, self.alert_source = [], ""
 
     # ---- drawing helpers
     def button(self, img, d, box, label, action, primary=False, size=24, fill=None):
@@ -1020,10 +1633,44 @@ class App:
         self.button(img, d, (M, 20, M + 170, 80), "Back", back)
         d.text((W // 2, 62), title, font=F("bold", 36), fill=TEXT, anchor="ms")
 
-    def show(self, img):
+    def show(self, img, shift=False):
+        if shift and SET.get("pixel_shift"):  # nudge the picture every 10 minutes against burn-in
+            n = local_now()
+            dx, dy = SHIFTS[(n.hour * 6 + n.minute // 10) % len(SHIFTS)]
+            if dx or dy:
+                moved = img.copy()  # uncovered edges keep the background underneath
+                moved.paste(img, (dx, dy))
+                img = moved
         if SET["rotate"] == 180:
             img = img.rotate(180)
         self.fb.show(img)
+
+    def views(self):
+        return ["dash", "hourly"] + (["sea"] if SET["sea"] else []) + ["timers"]
+
+    def set_view(self, view):
+        self.view = view
+        self.shown = None
+
+    def page_dots(self, d):
+        vs = self.views()
+        x = W // 2 - (len(vs) - 1) * 11
+        for v in vs:
+            r = 5 if v == self.view else 4
+            d.ellipse((x - r, 588 - r, x + r, 588 + r), fill=TEXT if v == self.view else DIM)
+            x += 22
+
+    def render_view(self, now, data, updated, error):
+        if self.view == "hourly":
+            img = self.render_hourly(now, data)
+        elif self.view == "sea":
+            img = self.render_sea(now, data)
+        elif self.view == "timers":
+            img = self.render_timers()
+        else:
+            img = self.render_clock(now, data, updated, error)
+        self.page_dots(ImageDraw.Draw(img))
+        return img
 
     def redraw(self):
         if self.mode == "clock":
@@ -1049,53 +1696,412 @@ class App:
             self.button(img, d, (W - M - 300, 250, W - M, 316), "Wi-Fi settings", self.open_wifi)
         elif error:
             d.text((M, 593), "Offline: tap here for Wi-Fi settings", font=F("bold", 16), fill=RAIN, anchor="ls")
-            self.buttons.append(((0, 540, 440, H), self.open_wifi))
+            self.buttons.append(((0, 572, 440, H), self.open_wifi))
+        if data:
+            t = today_index(data, now)
+            gap, fy, fh, n = 12, 430, 142, 5
+            fw = (W - 2 * M - gap * (n - 1)) // n
+            for j in range(n):  # tap a forecast day for its hours
+                if t + 1 + j < len(data["daily"]["time"]):
+                    x = M + j * (fw + gap)
+                    self.buttons.append(((x, fy, x + fw, fy + fh), lambda i=t + 1 + j: self.open_day(i)))
+            self.buttons.append(((M, 318, W - M, 418), lambda: self.set_view("hourly")))
+        self.draw_pills(img, d, now, data, footer_free=not error)
+        return img
+
+    def draw_pills(self, img, d, now, data, footer_free=True):
+        """Warning, rain and timer notices next to the place name. Each is tappable."""
+        label = SET["place"].upper()
+        x = M + fit(label, "bold", 22, 540).getlength(label) + 18
+        alerts, source = active_alerts(data, now)
+        self.alert_list, self.alert_source = alerts, source
+        pills = []
+        if alerts:
+            a = alerts[0]
+            more = "  +%d" % (len(alerts) - 1) if len(alerts) > 1 else ""
+            pills.append((a["title"] + more, ALERT_COLORS[a["level"]],
+                          (24, 20, 10) if a["level"] == 2 else (255, 255, 255), lambda: self.go("alerts")))
+        if self.timer_end is not None:
+            pills.append(("Timer ends %s" % self.timer_wall.strftime("%H:%M"), ACCENT, ON_ACCENT,
+                          lambda: self.set_view("timers")))
+        mins = rain_soon(data, now)
+        if mins:
+            pills.append(("Rain in ~%d min" % mins, RAIN, (10, 22, 44), lambda: self.set_view("hourly")))
+        foot_x, overflow = M, False
+        for text, bg, fg, action in pills:
+            room = 584 - x - 28
+            f = fit(text, "bold", 17, room, smallest=13)
+            if not overflow and room >= 60 and f.getlength(text) <= room:
+                w = int(f.getlength(text)) + 28
+                card(img, int(x), 38, w, 30, r=15, fill=bg)
+                d.text((x + w / 2, 53), text, font=f, fill=fg, anchor="mm")
+                self.buttons.insert(0, ((int(x) - 6, 16, int(x) + w + 6, 92), action))
+                x += w + 10
+                continue
+            overflow = True  # no room at the top: use the bottom-left corner
+            f = F("bold", 14)
+            w = int(f.getlength(text)) + 22
+            if not footer_free or foot_x + w > 440:
+                continue
+            card(img, int(foot_x), 576, w, 22, r=11, fill=bg)
+            d.text((foot_x + w / 2, 587), text, font=f, fill=fg, anchor="mm")
+            self.buttons.insert(0, ((int(foot_x) - 6, 572, int(foot_x) + w + 6, H), action))
+            foot_x += w + 8
+
+    # ---- hourly, day detail, sea, timers, warnings
+    def render_hourly(self, now, data):
+        img = background(is_day_now(data))
+        d = ImageDraw.Draw(img)
+        self.buttons = []
+        d.text((M, 62), "Next 24 hours", font=F("bold", 30), fill=TEXT, anchor="ls")
+        d.text((W - M, 62), SET["place"], font=fit(SET["place"], "reg", 20, 420), fill=MUTED, anchor="rs")
+        if not data or "hourly" not in data:
+            d.text((W // 2, 300), "Waiting for weather...", font=F("bold", 30), fill=MUTED, anchor="mm")
+        else:
+            draw_hours(img, d, data, hour_index(data, now) or 0, 24, 100)
+        return img
+
+    def open_day(self, i):
+        self.day_index = i
+        self.go("day")
+
+    def render_day(self):
+        img = background(True)
+        d = ImageDraw.Draw(img)
+        with lock:
+            data = state["data"]
+        if not data:
+            self.header(img, d, "Forecast", self.go_clock)
+            return img
+        dl = data["daily"]
+        i = self.day_index = max(0, min(len(dl["time"]) - 1, self.day_index))
+        date = datetime.strptime(dl["time"][i], "%Y-%m-%d")
+        self.header(img, d, "%s, %d %s" % (date.strftime("%A"), date.day, date.strftime("%B")), self.go_clock)
+        g = lambda k: (dl.get(k) or [None] * (i + 1))[i] or 0
+        summary = "H %d°   L %d°   Rain %d%% (%.0f mm)   Gusts %d km/h   UV %d   Sun %s - %s" % (
+            round(g("temperature_2m_max")), round(g("temperature_2m_min")), g("precipitation_probability_max"),
+            g("precipitation_sum"), round(g("wind_gusts_10m_max")), round(g("uv_index_max")),
+            hm(dl["sunrise"][i]), hm(dl["sunset"][i]))
+        d.text((W // 2, 116), summary, font=fit(summary, "reg", 21, W - 2 * M), fill=MUTED, anchor="ms")
+        start = hour_index(data, date)
+        if start is not None:
+            draw_hours(img, d, data, start, 24, 128)
+        d.text((W // 2, 588), "Swipe for other days", font=F("reg", 15), fill=DIM, anchor="ms")
+        return img
+
+    def render_sea(self, now, data):
+        img = background(is_day_now(data))
+        d = ImageDraw.Draw(img)
+        self.buttons = []
+        d.text((M, 62), "Sea", font=F("bold", 30), fill=TEXT, anchor="ls")
+        d.text((W - M, 62), SET["place"], font=fit(SET["place"], "reg", 20, 420), fill=MUTED, anchor="rs")
+        sea = (data or {}).get("sea")
+        cur = (sea or {}).get("current") or {}
+        if not data or sea is None:
+            d.text((W // 2, 300), "Getting sea data...", font=F("bold", 30), fill=MUTED, anchor="mm")
+            return img
+        if cur.get("wave_height") is None:
+            d.text((W // 2, 280), "No sea data for this place", font=F("bold", 30), fill=MUTED, anchor="mm")
+            d.text((W // 2, 324), "It may be too far from the coast.", font=F("reg", 22), fill=DIM, anchor="mm")
+            return img
+        sst = cur.get("sea_surface_temperature")
+        stats = [("Waves", "%.1f" % cur["wave_height"], "m"),
+                 ("Wave period", "%d" % round(cur.get("wave_period") or 0), "s"),
+                 ("Waves from", compass(cur.get("wave_direction") or 0), ""),
+                 ("Sea temperature", "%d°" % round(sst) if sst is not None else "--", "")]
+        g, cw = 12, (W - 2 * M - 36) // 4
+        for i, (label, val, unit) in enumerate(stats):
+            x = M + i * (cw + g)
+            card(img, x, 92, cw, 104)
+            d.text((x + 20, 124), label, font=F("reg", 18), fill=MUTED, anchor="ls")
+            vf = F("bold", 44)
+            d.text((x + 20, 178), val, font=vf, fill=TEXT, anchor="ls")
+            if unit:
+                d.text((x + 24 + vf.getlength(val), 178), unit, font=F("reg", 22), fill=MUTED, anchor="ls")
+        marks = tides(sea, now)[:4]
+        d.text((M, 236), "Tides" if marks else "No tide data here", font=F("bold", 22), fill=TEXT, anchor="ls")
+        for i, (kind, t, level) in enumerate(marks):
+            x = M + i * (cw + g)
+            card(img, x, 250, cw, 76)
+            day = "" if t.date() == now.date() else t.strftime("%a ")
+            d.text((x + 20, 284), "%s  %s%s" % (kind, day, t.strftime("%H:%M")), font=F("bold", 22),
+                   fill=TEXT, anchor="ls")
+            d.text((x + 20, 312), "%.1f m" % level, font=F("reg", 18), fill=MUTED, anchor="ls")
+        # tide curve for the next 24 hours
+        h = sea.get("hourly") or {}
+        lv, times = h.get("sea_level_height_msl") or [], h.get("time") or []
+        try:
+            s = times.index(now.strftime("%Y-%m-%dT%H:00"))
+        except ValueError:
+            s = None
+        if s is not None:
+            pts = [(i, lv[s + i]) for i in range(min(25, len(lv) - s)) if lv[s + i] is not None]
+            if len(pts) > 1:
+                x0, x1, y0, y1 = M + 8, W - M - 8, 360, 520
+                vals = [v for _, v in pts]
+                lo, hi = min(vals), max(vals)
+                hi = hi if hi - lo > 0.2 else lo + 0.2
+                xy = [(x0 + (x1 - x0) * i / 24, y1 - (v - lo) / (hi - lo) * (y1 - y0)) for i, v in pts]
+                d.line(xy, fill=RAIN, width=4, joint="curve")
+                for i in range(0, 25, 3):
+                    x = x0 + (x1 - x0) * i / 24
+                    d.text((x, 548), (now + timedelta(hours=i)).strftime("%H:00"), font=F("reg", 16),
+                           fill=MUTED, anchor="ms")
+                nx = x0 + (x1 - x0) * now.minute / 60 / 24
+                d.line((nx, y0 - 10, nx, y1 + 6), fill=DIM, width=2)
+        d.text((W - M, 576), "Model data, not for navigation", font=F("reg", 14), fill=DIM, anchor="rs")
+        return img
+
+    def render_timers(self):
+        img = background(True)
+        d = ImageDraw.Draw(img)
+        self.buttons = []
+        d.text((M, 62), "Timer", font=F("bold", 30), fill=TEXT, anchor="ls")
+        if self.timer_end is None:
+            g, cw = 20, (W - 2 * M - 60) // 4
+            for i, mins in enumerate(TIMER_CHOICES):
+                x = M + i * (cw + g)
+                self.button(img, d, (x, 140, x + cw, 400), "", lambda m=mins: self.start_timer(m))
+                d.text((x + cw / 2, 300), str(mins), font=F("heavy", 120), fill=TEXT, anchor="ms")
+                d.text((x + cw / 2, 352), "minutes", font=F("reg", 26), fill=MUTED, anchor="ms")
+            d.text((W // 2, 468), "The screen flashes when the time is up.", font=F("reg", 22),
+                   fill=MUTED, anchor="ms")
+        else:
+            left = max(0, self.timer_end - time.monotonic())
+            mm, ss = divmod(int(left + 0.999), 60)
+            f, dw, cw = clock_metrics(760, 230)
+            draw_clock(d, "%02d:%02d" % (mm, ss), (W - (4 * dw + cw)) / 2, 330, 760, biggest=230)
+            d.text((W // 2, 398), "Ends at %s" % self.timer_wall.strftime("%H:%M"), font=F("reg", 28),
+                   fill=MUTED, anchor="ms")
+            self.button(img, d, (W // 2 - 250, 436, W // 2 - 10, 508), "+1 minute", self.add_minute)
+            self.button(img, d, (W // 2 + 10, 436, W // 2 + 250, 508), "Cancel", self.cancel_timer)
+        return img
+
+    def start_timer(self, mins):
+        self.timer_end = time.monotonic() + mins * 60
+        self.timer_wall = local_now() + timedelta(minutes=mins)
+        log("timer started:", mins, "min")
+
+    def add_minute(self):
+        self.timer_end += 60
+        self.timer_wall += timedelta(minutes=1)
+
+    def cancel_timer(self):
+        self.timer_end = self.timer_wall = None
+
+    def start_ring(self):
+        self.timer_end = self.timer_wall = None
+        self.ring_until = time.monotonic() + RING_SECS
+        last_touch[0] = time.monotonic()
+        self.mode = "ring"
+        log("timer finished")
+
+    def stop_ring(self):
+        self.ring_until = None
+        self.view = "dash"
+        self.go_clock()
+
+    def render_ring(self):
+        on = int(time.monotonic() * 2) % 2 == 0
+        img = Image.new("RGB", (W, H), ACCENT if on else (0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.text((W // 2, 290), "Time's up!", font=F("heavy", 130), fill=(255, 255, 255), anchor="mm")
+        d.text((W // 2, 420), "Tap anywhere to stop", font=F("reg", 30), fill=(255, 255, 255), anchor="mm")
+        self.buttons = [((0, 0, W, H), self.stop_ring)]
+        return img
+
+    def render_alerts(self):
+        img = background(True)
+        d = ImageDraw.Draw(img)
+        self.header(img, d, "Weather warnings", self.go_clock)
+        now = local_now()
+        if not self.alert_list:
+            d.text((W // 2, 300), "No warnings right now", font=F("bold", 30), fill=MUTED, anchor="mm")
+        y = 100
+        for a in self.alert_list:
+            lines = wrap(a["detail"], F("reg", 19), W - 2 * M - 60)
+            if len(lines) > 3:
+                lines = lines[:3]
+                lines[2] += " ..."
+            h = 62 + 26 * len(lines)
+            if y + h > 566:
+                break
+            card(img, M, y, W - 2 * M, h)
+            card(img, M, y, 12, h, r=6, fill=ALERT_COLORS[a["level"]])
+            d.text((M + 30, y + 38), a["title"], font=fit(a["title"], "bold", 24, 560), fill=TEXT, anchor="ls")
+            d.text((W - M - 20, y + 38), alert_when(a, now), font=F("reg", 18), fill=MUTED, anchor="rs")
+            for k, line in enumerate(lines):
+                d.text((M + 30, y + 66 + 26 * k), line, font=font_for(line, "reg", 19), fill=MUTED, anchor="ls")
+            y += h + 12
+        if self.alert_source:
+            d.text((M, 590), "Source: " + self.alert_source, font=F("reg", 15), fill=DIM, anchor="ls")
         return img
 
     # ---- settings
     def open_settings(self):
         conn, _ = wifi_status()
         self.wifi_name = conn or "Not connected"
+        self.settings_page = 0
         self.go("settings")
 
     def render_settings(self):
         img = background(True)
         d = ImageDraw.Draw(img)
-        self.header(img, d, "Settings", self.go_clock)
+        first = self.settings_page == 0
+        self.header(img, d, "Settings", self.go_clock if first else lambda: self.set_settings_page(0))
         box = (W - M - 80, 20, W - M, 80)
         self.button(img, d, box, "", self.confirm_power)
         pic = power_icon(36, TEXT)
         img.paste(pic, ((box[0] + box[2]) // 2 - 18, (box[1] + box[3]) // 2 - 18), pic)
-        tiles = [
-            ("Theme", SET["theme"], self.open_themes, None),
-            ("Location", SET["place"], self.start_location, None),
-            ("Day brightness", "%d%%" % SET["day_bright"], None, "day_bright"),
-            ("Night brightness", "%d%%" % SET["night_bright"], None, "night_bright"),
-            ("Night mode", label_of(NIGHT_MODES, SET["night_mode"]),
-             lambda: self.cycle("night_mode", NIGHT_MODES), None),
-            ("Night hours", label_of(NIGHT_HOURS, SET["night_hours"]),
-             lambda: self.cycle("night_hours", NIGHT_HOURS), None),
-            ("Screen rotation", label_of(ROTATIONS, SET["rotate"]),
-             lambda: self.cycle("rotate", ROTATIONS), None),
-            ("Wi-Fi", self.wifi_name, self.open_wifi, None),
-        ]
+        if first:
+            self.button(img, d, (W - M - 242, 20, W - M - 92, 80), "More", lambda: self.set_settings_page(1))
+        onoff = lambda k: "On" if SET.get(k) else "Off"
+        if first:
+            tiles = [
+                ("Theme", SET["theme"], lambda: self.open_themes("theme"), None),
+                ("Location", SET["place"], self.start_location, None),
+                ("Day brightness", "%d%%" % SET["day_bright"], None, "day_bright"),
+                ("Night brightness", "%d%%" % SET["night_bright"], None, "night_bright"),
+                ("Night mode", label_of(NIGHT_MODES, SET["night_mode"]),
+                 lambda: self.cycle("night_mode", NIGHT_MODES), None),
+                ("Night hours", label_of(NIGHT_HOURS, SET["night_hours"]),
+                 lambda: self.cycle("night_hours", NIGHT_HOURS), None),
+                ("Screen rotation", label_of(ROTATIONS, SET["rotate"]),
+                 lambda: self.cycle("rotate", ROTATIONS), None),
+                ("Wi-Fi", self.wifi_name, self.open_wifi, None),
+            ]
+        else:
+            tiles = [
+                ("Sea conditions page", onoff("sea"), lambda: self.toggle("sea"), "toggle:sea"),
+                ("Rain alerts", onoff("rain_alerts"), lambda: self.toggle("rain_alerts"), "toggle:rain_alerts"),
+                ("Weather warnings", onoff("warnings"), lambda: self.toggle("warnings"), "toggle:warnings"),
+                ("Burn-in protection", onoff("pixel_shift"), lambda: self.toggle("pixel_shift"),
+                 "toggle:pixel_shift"),
+                ("Night theme", SET.get("night_theme") or "Off", lambda: self.open_themes("night_theme"), None),
+                ("Phone settings", ("On, PIN %s" % WEB["pin"]) if WEB["server"] else "Off",
+                 self.phone_settings, None),
+                ("Status & updates", "Version %s" % VERSION, self.open_status, None),
+            ]
         colw, th, g, y0 = (W - 2 * M - 12) // 2, 108, 12, 100
-        for i, (label, value, action, stepper) in enumerate(tiles):
+        for i, (label, value, action, kind) in enumerate(tiles):
             x = M + (i % 2) * (colw + g)
             y = y0 + (i // 2) * (th + g)
             card(img, x, y, colw, th)
             d.text((x + 22, y + 40), label, font=F("reg", 20), fill=MUTED, anchor="ls")
-            room = colw - 44 - (160 if stepper else 30)
+            stepper = kind and not kind.startswith("toggle")
+            room = colw - 44 - (160 if stepper else 90 if kind else 30)
             d.text((x + 22, y + 82), value, font=fit(value, "bold", 30, room), fill=TEXT, anchor="ls")
             if stepper:
                 self.button(img, d, (x + colw - 164, y + 20, x + colw - 94, y + 88), "-",
-                            lambda k=stepper: self.step(k, -10), size=36)
+                            lambda k=kind: self.step(k, -10), size=36)
                 self.button(img, d, (x + colw - 84, y + 20, x + colw - 14, y + 88), "+",
-                            lambda k=stepper: self.step(k, 10), size=36)
+                            lambda k=kind: self.step(k, 10), size=36)
+                continue
+            self.buttons.append(((x, y, x + colw, y + th), action))
+            if kind:  # on/off switch
+                on = bool(SET.get(kind.split(":")[1]))
+                sx, sy = x + colw - 92, y + th // 2 - 18
+                card(img, sx, sy, 68, 36, r=18, fill=ACCENT if on else DIM)
+                kx = sx + (50 if on else 18)
+                d.ellipse((kx - 13, sy + 5, kx + 13, sy + 31), fill=(255, 255, 255))
             else:
-                self.buttons.append(((x, y, x + colw, y + th), action))
                 d.text((x + colw - 24, y + th // 2), ">", font=F("bold", 30), fill=MUTED, anchor="rm")
+        for k in range(2):  # page dots
+            cx = W // 2 - 11 + 22 * k
+            r = 5 if k == self.settings_page else 4
+            d.ellipse((cx - r, 588 - r, cx + r, 588 + r), fill=TEXT if k == self.settings_page else DIM)
         return img
+
+    def set_settings_page(self, page):
+        self.settings_page = page
+
+    def toggle(self, key):
+        SET[key] = not SET.get(key)
+        save_settings()
+        if key in ("sea", "warnings"):
+            refresh_now.set()  # fetch the new data now
+        self.shown = None
+
+    def phone_settings(self):
+        if not WEB["server"]:
+            try:
+                web_start()
+            except OSError as e:
+                log("phone settings page failed:", e)
+                self.message("Could not start phone settings", str(e)[:140],
+                             [("OK", lambda: self.go("settings"), True)])
+                return
+            SET["web"] = True
+            save_settings()
+        self.phone_message(wifi_status()[1])
+
+    def phone_message(self, ip):
+        self.message("Phone settings are on",
+                     "On a phone on the same Wi-Fi, open  http://%s:%d  and enter PIN %s"
+                     % (ip or "<clock IP>", WEB_PORT, WEB["pin"]),
+                     [("Turn off", self.phone_off, False), ("OK", lambda: self.go("settings"), True)])
+
+    def phone_off(self):
+        web_stop()
+        SET["web"] = False
+        save_settings()
+        self.go("settings")
+
+    def open_status(self):
+        self.status_info = system_status()
+        self.update_tag, self.update_note = None, ""
+        self.go("status")
+
+    def render_status(self):
+        img = background(True)
+        d = ImageDraw.Draw(img)
+        self.header(img, d, "Status & updates", lambda: self.go("settings"))
+        colw, th, g = (W - 2 * M - 12) // 2, 78, 10
+        for i, (label, value) in enumerate(self.status_info):
+            x = M + (i % 2) * (colw + g)
+            y = 98 + (i // 2) * (th + g)
+            card(img, x, y, colw, th)
+            d.text((x + 22, y + 30), label, font=F("reg", 17), fill=MUTED, anchor="ls")
+            d.text((x + 22, y + 62), value, font=fit(value, "bold", 24, colw - 44), fill=TEXT, anchor="ls")
+        if self.update_tag:
+            self.button(img, d, (W - M - 320, 470, W - M, 540), "Install %s" % self.update_tag,
+                        self.install_update, primary=True)
+        else:
+            self.button(img, d, (W - M - 320, 470, W - M, 540), "Check for updates", self.check_updates)
+        if self.update_note:
+            for k, line in enumerate(wrap(self.update_note, F("reg", 20), 560)[:2]):
+                d.text((M, 498 + 28 * k), line, font=F("reg", 20), fill=MUTED, anchor="ls")
+        return img
+
+    def check_updates(self):
+        try:
+            tag = self.busy("Checking GitHub for updates...", latest_release)
+        except urllib.error.HTTPError as e:
+            self.update_note = ("No release has been published yet." if e.code == 404
+                                else "GitHub answered with error %d." % e.code)
+        except Exception as e:
+            log("update check failed:", e)
+            self.update_note = "Could not reach GitHub. Check the Wi-Fi connection."
+        else:
+            if version_tuple(tag) > version_tuple(VERSION):
+                self.update_tag = tag
+                self.update_note = "Version %s is available (you have %s)." % (tag, VERSION)
+            else:
+                self.update_note = "Up to date. The latest release is %s." % tag
+        self.mode = "status"
+
+    def install_update(self):
+        tag = self.update_tag
+        try:
+            self.busy("Installing %s..." % tag, lambda: install_release(tag))
+        except Exception as e:
+            log("update failed:", e)
+            self.message("Update failed", str(e)[:140], [("OK", lambda: self.go("status"), True)])
+            return
+        self.message("Updated to %s" % tag, "The clock is restarting.", [])
+        if self.fb:
+            self.redraw()
+        subprocess.Popen(["systemctl", "restart", "weatherclock"])
 
     def step(self, key, delta):
         lo = 10 if key == "day_bright" else 5
@@ -1140,7 +2146,12 @@ class App:
     def render_themes(self):
         img = background(True)
         d = ImageDraw.Draw(img)
-        self.header(img, d, "Theme", lambda: self.go("settings"))
+        night = self.theme_target == "night_theme"
+        self.header(img, d, "Night theme" if night else "Theme", lambda: self.go("settings"))
+        current = SET.get(self.theme_target) or ""
+        if night:
+            self.button(img, d, (W - M - 170, 20, W - M, 80), "Off", lambda: self.pick_theme(""),
+                        primary=not current)
         cols, rows, g, y0 = 4, 3, 14, 104
         per_page = cols * rows
         pages = (len(THEME_ORDER) + per_page - 1) // per_page
@@ -1152,7 +2163,7 @@ class App:
             th = THEMES[name]
             x = M + (i % cols) * (cw + g)
             y = y0 + (i // cols) * (ch + g)
-            if name == THEME_NAME:
+            if name == current:
                 card(img, x - 5, y - 5, cw + 10, ch + 10, r=22, fill=ACCENT)
             img.paste(gradient(th["day"][0], th["day"][1], cw, ch), (x, y), rmask(cw, ch, 18))
             d.text((x + 16, y + 38), name, font=F("bold", 24), fill=th["text"], anchor="ls")
@@ -1170,18 +2181,29 @@ class App:
                    font=F("reg", 20), fill=MUTED, anchor="mm")
         return img
 
-    def open_themes(self):
-        if THEME_NAME in THEME_ORDER:  # open on the page with the current theme
-            self.theme_page = THEME_ORDER.index(THEME_NAME) // 12
+    def open_themes(self, target="theme"):
+        self.theme_target = target
+        current = SET.get(target) or ""
+        self.theme_page = THEME_ORDER.index(current) // 12 if current in THEME_ORDER else 0
         self.go("themes")
 
     def theme_step(self, step):
         self.theme_page += step
 
     def pick_theme(self, name):
-        apply_theme(name)
-        SET["theme"] = name
+        SET[self.theme_target] = name
         save_settings()
+        with lock:
+            data = state["data"]
+        self.sync_theme(in_night_window(local_now(), data))
+
+    def sync_theme(self, night):
+        """Use the night theme during night hours (if one is chosen), the main theme otherwise."""
+        want = SET["night_theme"] if night and SET.get("night_theme") in THEMES else SET["theme"]
+        if want != THEME_NAME:
+            apply_theme(want)
+            self.shown = None
+            self.dirty = True
 
     # ---- location search
     def start_location(self):
@@ -1221,13 +2243,7 @@ class App:
         return img
 
     def pick_place(self, p):
-        SET.update(place="%s, %s" % (p["name"], p["country"]) if p["country"] else p["name"],
-                   lat=p["lat"], lon=p["lon"], tz=p["tz"])
-        save_settings()
-        with lock:
-            state.update(data=None, updated=None, error=None)
-        refresh_now.set()
-        log("location set to", SET["place"])
+        set_place(p)
         self.go_clock()
 
     # ---- Wi-Fi list
@@ -1480,18 +2496,29 @@ class App:
 
     # ---- input
     def handle(self, kind, x, y):
-        if kind not in ("tap", "long"):
+        if kind == "web":  # settings changed from the phone page
+            self.shown = None
+            self.dirty = True
+            return
+        if kind not in ("tap", "long", "swipe_l", "swipe_r"):
             return
         log("%s at %d,%d (%s)" % (kind, x, y, self.mode))
         self.last_input = time.monotonic()
+        if self.mode == "ring":  # any touch stops a finished timer
+            self.stop_ring()
+            return
         if self.mode == "clock":
             if kind == "long":
                 self.open_settings()
                 self.dirty = True
                 return
-            if self.dimmed:  # first tap at night only wakes the screen
+            if self.dimmed:  # first touch at night only wakes the screen
                 self.shown = None
                 return
+        if kind in ("swipe_l", "swipe_r"):
+            self.swipe(1 if kind == "swipe_l" else -1)
+            self.dirty = True
+            return
         for (x0, y0, x1, y1), action in list(self.buttons):
             if x0 <= x <= x1 and y0 <= y <= y1:
                 action()
@@ -1500,36 +2527,62 @@ class App:
                     self.shown = None
                 return
 
+    def swipe(self, step):
+        if self.mode == "clock":
+            vs = self.views()
+            i = vs.index(self.view) if self.view in vs else 0
+            self.set_view(vs[max(0, min(len(vs) - 1, i + step))])
+        elif self.mode == "day":
+            self.day_index += step  # clamped when drawn
+        elif self.mode == "settings":
+            self.settings_page = max(0, min(1, self.settings_page + step))
+        elif self.mode == "themes":
+            pages = (len(THEME_ORDER) + 11) // 12
+            self.theme_page = max(0, min(pages - 1, self.theme_page + step))
+
     # ---- main loop
     def run(self):
         while True:
             now = local_now()
+            mono = time.monotonic()
             with lock:
                 data, updated, error = state["data"], state["updated"], state["error"]
-            if self.mode != "clock" and time.monotonic() - self.last_input > IDLE_SECS:
+            if self.timer_end is not None and mono >= self.timer_end:
+                self.start_ring()
+            if self.mode == "ring" and mono > self.ring_until:
+                self.stop_ring()
+            idle = mono - self.last_input > IDLE_SECS
+            if self.mode not in ("clock", "ring") and idle:
                 self.go_clock()
-            awake = time.monotonic() - last_touch[0] < WAKE_SECS
+            if self.view not in self.views() or (
+                    idle and self.view != "dash" and not (self.view == "timers" and self.timer_end)):
+                self.set_view("dash")
+            awake = mono - last_touch[0] < WAKE_SECS
             night = in_night_window(now, data)
+            self.sync_theme(night)
             quiet = night and SET["night_mode"] != "off" and not awake and self.mode == "clock"
             if self.mode == "clock":
-                view = "bedside" if quiet and SET["night_mode"] == "bedside" else "dash"
+                view = "bedside" if quiet and SET["night_mode"] == "bedside" else self.view
+                tick = int(self.timer_end - mono) if view == "timers" and self.timer_end else 0
                 key = (now.strftime("%Y%m%d%H%M"), updated, bool(error), view, THEME_NAME,
-                       SET["place"], SET["rotate"])
+                       SET["place"], SET["rotate"], SET["sea"], tick, self.timer_end is not None)
                 if key != self.shown:
                     if view == "bedside":
                         self.buttons = []
-                        self.show(render_bedside(now, data))
+                        self.show(render_bedside(now, data), shift=True)
                     else:
-                        self.show(self.render_clock(now, data, updated, error))
+                        self.show(self.render_view(now, data, updated, error), shift=True)
                     self.shown = key
-            elif self.dirty:
+            elif self.mode == "ring" or self.dirty:
                 self.redraw()
             level = SET["night_bright"] if quiet else SET["day_bright"]
             if self.bright_preview:
-                if time.monotonic() < self.bright_preview[1]:
+                if mono < self.bright_preview[1]:
                     level = self.bright_preview[0]
                 else:
                     self.bright_preview = None
+            if self.mode == "ring":  # flash the backlight too
+                level = 100 if int(mono * 2) % 2 == 0 else 25
             self.bl.set(level)
             self.dimmed = quiet
             now = local_now()
@@ -1538,6 +2591,11 @@ class App:
                 timeout = min(timeout, 2)
             if self.mode != "clock":
                 timeout = min(timeout, 10)
+            if self.timer_end is not None:
+                left = self.timer_end - time.monotonic()
+                timeout = min(timeout, max(0.05, left), 0.5 if self.view == "timers" else 60)
+            if self.mode == "ring":
+                timeout = min(timeout, 0.5)
             try:
                 kind, x, y = events.get(timeout=timeout)
             except queue.Empty:
@@ -1595,6 +2653,62 @@ def preview_ui(folder):
     app.render_keyboard().save(p("keyboard-sym2.png"))
     apply_theme("Daylight")
     app.render_settings().save(p("settings-daylight.png"))
+    apply_theme("Midnight")
+    # new screens
+    with lock:
+        state.update(data=data, updated=now)
+    app.view = "hourly"
+    app.render_view(now, data, now, None).save(p("hourly.png"))
+    SET["sea"] = True
+    try:
+        data["sea"] = fetch(marine_url())
+    except Exception as e:
+        log("sea preview fetch failed:", e)
+    app.view = "sea"
+    app.render_view(now, data, now, None).save(p("sea.png"))
+    app.view = "timers"
+    app.render_view(now, data, now, None).save(p("timers.png"))
+    app.start_timer(10)
+    app.timer_end -= 152  # show a partly run timer
+    app.render_view(now, data, now, None).save(p("timer-running.png"))
+    app.render_ring().save(p("timer-done.png"))
+    app.open_day(today_index(data, now) + 1)
+    app.render_day().save(p("day.png"))
+    # dashboard with a warning, a running timer and rain on the way
+    demo = dict(data)
+    demo["current"] = dict(data["current"], precipitation=0)
+    demo["minutely_15"] = {"time": [(now + timedelta(minutes=25)).strftime("%Y-%m-%dT%H:%M")],
+                           "precipitation": [0.4]}
+    demo["alerts"] = [{"level": 3, "title": "Orange Wind Warning",
+                       "detail": "Gusts of up to 90 km/h from the northwest, especially on the coast and "
+                                 "in high areas.", "start": now - timedelta(hours=2),
+                       "end": now + timedelta(hours=9)},
+                      {"level": 2, "title": "Yellow Coastal Event Warning",
+                       "detail": "Northwest waves of 4 to 5 metres.", "start": now + timedelta(hours=14),
+                       "end": now + timedelta(hours=30)}]
+    demo["alerts_source"] = "MeteoAlarm"
+    app.view = "dash"
+    app.render_view(now, demo, now, None).save(p("clock-alerts.png"))
+    app.render_alerts().save(p("alerts.png"))
+    app.timer_end = app.timer_wall = None
+    app.alert_list = forecast_alerts(dict(data, daily=dict(data["daily"], wind_gusts_10m_max=[95] * 7)), now)
+    app.alert_source = "Forecast-based (no official warnings available here)"
+    app.render_alerts().save(p("alerts-forecast.png"))
+    app.settings_page = 1
+    app.render_settings().save(p("settings-2.png"))
+    log("status check returned %d items" % len(system_status()))
+    app.status_info = [  # sample values: screenshots are public, so never show the real network
+        ("Version", VERSION), ("IP address", "192.168.1.50"), ("Wi-Fi", "HomeNetwork (82%)"),
+        ("Uptime", "2 d 5 h"), ("Storage", "2.6 GB free of 7.3 GB"), ("Memory", "1810 MB free of 1983 MB"),
+        ("CPU temperature", "49°C"), ("Weather updated", now.strftime("%H:%M"))]
+    app.update_note = "Up to date. The latest release is v%s." % VERSION
+    app.render_status().save(p("status.png"))
+    SET["night_theme"] = "Amber"
+    app.open_themes("night_theme")
+    app.render_themes().save(p("night-theme.png"))
+    WEB["pin"] = "4821"
+    app.phone_message("192.168.1.50")
+    app.render_message().save(p("phone.png"))
     print("saved previews to", folder)
 
 
@@ -1607,6 +2721,11 @@ def main():
     bl.on()
     threading.Thread(target=weather_loop, daemon=True).start()
     threading.Thread(target=touch_loop, daemon=True).start()
+    if SET.get("web"):
+        try:
+            web_start()
+        except OSError as e:
+            log("phone settings page failed:", e)
     App(fb, bl).run()
 
 
