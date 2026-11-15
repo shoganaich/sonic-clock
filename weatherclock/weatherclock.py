@@ -79,6 +79,8 @@ def save_settings():
         tmp = SETTINGS_FILE + ".tmp"
         with open(tmp, "w") as f:
             json.dump(SET, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())  # the root filesystem is read/write: survive a power cut
         os.replace(tmp, SETTINGS_FILE)
     except OSError as e:
         log("could not save settings:", e)
@@ -1035,6 +1037,7 @@ class App:
         img = background(True)
         d = ImageDraw.Draw(img)
         self.header(img, d, "Settings", self.go_clock)
+        self.button(img, d, (W - M - 170, 20, W - M, 80), "Power", self.confirm_power)
         tiles = [
             ("Theme", SET["theme"], self.open_themes, None),
             ("Location", SET["place"], self.start_location, None),
@@ -1077,6 +1080,33 @@ class App:
         i = values.index(SET[key]) if SET[key] in values else -1
         SET[key] = values[(i + 1) % len(values)]
         save_settings()
+
+    # ---- power
+    def confirm_power(self):
+        self.message("Turn off the clock?",
+                     "Don't use the side button or pull the plug: the Pad's files can be damaged. "
+                     "Shut down here first, then unplug.",
+                     [("Cancel", lambda: self.go("settings"), False),
+                      ("Restart", lambda: self.power("reboot", "Restarting...",
+                                                     "The clock will be back in about a minute."), False),
+                      ("Shut down", lambda: self.power("poweroff", "Shutting down...",
+                                                       "Wait 30 seconds, then it is safe to unplug the Pad."), True)])
+
+    def power(self, verb, title, body):
+        self.message(title, body, [])
+        if self.fb:
+            self.redraw()
+        log("power:", verb)
+        os.sync()
+        try:
+            r = subprocess.run(["systemctl", verb], capture_output=True, text=True, timeout=30)
+            err = "" if r.returncode == 0 else (r.stderr.strip() or "systemctl %s failed" % verb)
+        except (OSError, subprocess.SubprocessError) as e:
+            err = str(e)
+        if err:
+            log("power failed:", err)
+            self.message("Could not %s" % ("restart" if verb == "reboot" else "shut down"), err[:140],
+                         [("OK", lambda: self.go("settings"), True)])
 
     # ---- theme picker
     def render_themes(self):
@@ -1507,6 +1537,8 @@ def preview_ui(folder):
     app.render_clock(now, data, now, "offline").save(p("clock-offline.png"))
     app.wifi_name = "HomeNetwork"
     app.render_settings().save(p("settings.png"))
+    app.confirm_power()
+    app.render_message().save(p("power.png"))
     app.render_themes().save(p("themes.png"))
     app.theme_page = 1
     app.render_themes().save(p("themes-2.png"))

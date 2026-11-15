@@ -38,8 +38,15 @@ no keyboard, mouse or desktop, and everything can be changed from the touchscree
 | Hold a finger on the screen for 2 seconds, then let go | Open **Settings** |
 | Tap the screen at night | Show the full dashboard for 30 seconds (the first tap only wakes it) |
 | Tap "Wi-Fi settings" (shown only when offline) | Go straight to the Wi-Fi list |
+| Settings → Power → Shut down or Restart | Turn the clock off or restart it safely |
 
 Settings screens return to the clock after 3 minutes without a touch.
+
+> [!WARNING]
+> **Don't turn it off with the side button or by pulling the plug.** Debian on the
+> Pad uses a read/write filesystem, so cutting the power can damage files. Use
+> Settings → Power → Shut down, wait 30 seconds, then unplug. Over SSH:
+> `ssh sonic@<pad-ip> sudo poweroff`.
 
 **Changing Wi-Fi:** Settings → Wi-Fi → tap a network → type the password → Connect.
 The network is saved and rejoined automatically after reboots. Tap a saved network
@@ -59,6 +66,12 @@ the clock's time zone switch to that place.
 
 Nothing needs installing on the Pad: it already has Python 3.9, Pillow,
 NetworkManager and the fonts used.
+
+> [!CAUTION]
+> Replacing the Pad's firmware will most likely void its warranty. Neither this
+> project nor SonicPad-Debian is endorsed by Creality. Read the
+> [SonicPad-Debian disclaimers](https://github.com/Jpe230/SonicPad-Debian#-disclaimers)
+> before flashing. You do this at your own risk.
 
 ## First-time setup
 
