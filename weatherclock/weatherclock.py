@@ -47,6 +47,8 @@ TOUCH_DEV = "/dev/input/event2"            # gt9xxnew_ts
 BRIGHTNESS_BIN = "/usr/bin/brightness"
 WIFI_IF = "wlan0"
 WAKE_SECS = 30                             # full screen after a tap at night
+SCREEN_OFF_SECS = 10                       # in the screen-off hours, backlight off this long after a touch
+SETTINGS_PAGES = 3
 LONG_PRESS = 2.0                           # seconds held to open Settings
 IDLE_SECS = 180                            # settings screens return to the clock
 REFRESH_OK, REFRESH_FAIL = 600, 60         # seconds between weather fetches
@@ -78,6 +80,7 @@ DEFAULTS = {
     "cc": "PT", "regions": ["Setúbal District", "Sines Municipality"],  # for official warnings
     "sea": False, "rain_alerts": True, "warnings": True,
     "night_theme": "", "pixel_shift": True, "web": False, "animations": True,
+    "screen_off": False, "off_from": 23 * 60, "off_until": 7 * 60,   # minutes after midnight
 }
 NIGHT_MODES = [("bedside", "Bedside clock"), ("dim", "Dim dashboard"), ("off", "Off")]
 NIGHT_HOURS = [("sun", "Sunset to sunrise"), ("22", "22:00 to 07:00"), ("23", "23:00 to 07:00")]
@@ -914,6 +917,7 @@ class Framebuffer:
 class Backlight:
     def __init__(self):
         self.level = None
+        self.lit = True
 
     def _run(self, *args):
         try:
@@ -925,6 +929,13 @@ class Backlight:
 
     def on(self):
         self._run("-s", "1")
+
+    def power(self, on):
+        """Switch the backlight on or off (only runs the tool when the state changes)."""
+        if on != self.lit:
+            self._run("-s", "1" if on else "0")
+            self.lit = on
+            self.level = None  # set the brightness again after switching on
 
     def set(self, level):
         if level != self.level:
@@ -1371,6 +1382,9 @@ def login_html(error):
             "autocomplete=off autofocus><button>Open settings</button></form>" % err)
 
 
+HALF_HOURS = [(str(m), "%02d:%02d" % divmod(m, 60)) for m in range(0, 24 * 60, 30)]
+
+
 def select_html(name, options, current):
     opts = "".join("<option value='%s'%s>%s</option>" % (html.escape(str(v)), " selected" if v == current else "",
                                                          html.escape(label)) for v, label in options)
@@ -1393,14 +1407,20 @@ def settings_html(saved):
             "<label>Day brightness (10-100)</label><input type=number name=day_bright min=10 max=100 step=5 value=%d>"
             "<label>Night brightness (5-100)</label><input type=number name=night_bright min=5 max=100 step=5 value=%d>"
             "<label>Night mode</label>%s<label>Night hours</label>%s<label>Screen rotation</label>%s"
-            "%s<button>Save</button></form>"
+            "%s<div class=row><input type=checkbox id=screen_off name=screen_off%s>"
+            "<label for=screen_off>Screen off schedule (dark %d s after the last touch)</label></div>"
+            "<label>Turn off at</label>%s<label>Turn on at</label>%s"
+            "<button>Save</button></form>"
             % ("<p class=msg>Saved.</p>" if saved else "", e(SET["place"]),
                select_html("theme", themes, SET["theme"]),
                select_html("night_theme", [("", "Off")] + themes, SET.get("night_theme") or ""),
                SET["day_bright"], SET["night_bright"],
                select_html("night_mode", NIGHT_MODES, SET["night_mode"]),
                select_html("night_hours", NIGHT_HOURS, SET["night_hours"]),
-               select_html("rotate", [(str(v), l) for v, l in ROTATIONS], str(SET["rotate"])), checks))
+               select_html("rotate", [(str(v), l) for v, l in ROTATIONS], str(SET["rotate"])), checks,
+               " checked" if SET.get("screen_off") else "", SCREEN_OFF_SECS,
+               select_html("off_from", HALF_HOURS, str(SET["off_from"])),
+               select_html("off_until", HALF_HOURS, str(SET["off_until"]))))
 
 
 def search_html(query):
@@ -1434,8 +1454,11 @@ def apply_web_settings(f):
             SET[key] = f[key]
     if f.get("rotate") in ("0", "180"):
         SET["rotate"] = int(f["rotate"])
-    for key in ("sea", "rain_alerts", "warnings", "pixel_shift", "animations"):
+    for key in ("sea", "rain_alerts", "warnings", "pixel_shift", "animations", "screen_off"):
         SET[key] = f.get(key) == "on"
+    for key in ("off_from", "off_until"):
+        if f.get(key) in [v for v, _ in HALF_HOURS]:
+            SET[key] = int(f[key])
     save_settings()
     refresh_now.set()
 
@@ -1573,6 +1596,20 @@ def in_night_window(now, data):
     if hours == "sun":
         return is_night(now, data) if data else (now.hour >= 21 or now.hour < 7)
     return now.hour >= int(hours) or now.hour < 7
+
+
+def in_screen_off_window(now):
+    """Inside the screen-off hours? The window may cross midnight (e.g. 23:00 to 07:00)."""
+    if not SET.get("screen_off"):
+        return False
+    start, end, t = SET["off_from"], SET["off_until"], now.hour * 60 + now.minute
+    if start == end:
+        return False
+    return start <= t < end if start < end else (t >= start or t < end)
+
+
+def hhmm(minutes):
+    return "%02d:%02d" % divmod(minutes % (24 * 60), 60)
 
 
 # ---------------------------------------------------------------- touch thread
@@ -2194,10 +2231,24 @@ class App:
         self.button(img, d, box, "", self.confirm_power)
         pic = power_icon(36, TEXT)
         img.paste(pic, ((box[0] + box[2]) // 2 - 18, (box[1] + box[3]) // 2 - 18), pic)
-        if first:
-            self.button(img, d, (W - M - 242, 20, W - M - 92, 80), "More", lambda: self.set_settings_page(1))
+        last = self.settings_page == SETTINGS_PAGES - 1
+        if not last:
+            self.button(img, d, (W - M - 242, 20, W - M - 92, 80), "More",
+                        lambda: self.set_settings_page(self.settings_page + 1))
         onoff = lambda k: "On" if SET.get(k) else "Off"
-        if first:
+        if last:
+            tiles = [
+                ("Screen off schedule", onoff("screen_off"), lambda: self.toggle("screen_off"),
+                 "toggle:screen_off"),
+                ("", "", None, None),
+                ("Turn off at", hhmm(SET["off_from"]), None, "time:off_from"),
+                ("Turn on at", hhmm(SET["off_until"]), None, "time:off_until"),
+            ]
+            d.text((M, 372), "Between these times the screen goes dark %d seconds after the last touch."
+                   % SCREEN_OFF_SECS, font=F("reg", 20), fill=MUTED, anchor="ls")
+            d.text((M, 402), "Touch it to see the clock again. The clock keeps running.",
+                   font=F("reg", 20), fill=MUTED, anchor="ls")
+        elif first:
             tiles = [
                 ("Theme", SET["theme"], lambda: self.open_themes("theme"), None),
                 ("Location", SET["place"], self.start_location, None),
@@ -2228,16 +2279,20 @@ class App:
         for i, (label, value, action, kind) in enumerate(tiles):
             x = M + (i % 2) * (colw + g)
             y = y0 + (i // 2) * (th + g)
+            if not label:  # empty slot
+                continue
             card(img, x, y, colw, th)
             d.text((x + 22, y + 40), label, font=F("reg", 20), fill=MUTED, anchor="ls")
             stepper = kind and not kind.startswith("toggle")
             room = colw - 44 - (160 if stepper else 90 if kind else 30)
             d.text((x + 22, y + 82), value, font=fit(value, "bold", 30, room), fill=TEXT, anchor="ls")
             if stepper:
-                self.button(img, d, (x + colw - 164, y + 20, x + colw - 94, y + 88), "-",
-                            lambda k=kind: self.step(k, -10), size=36)
-                self.button(img, d, (x + colw - 84, y + 20, x + colw - 14, y + 88), "+",
-                            lambda k=kind: self.step(k, 10), size=36)
+                if kind.startswith("time:"):  # half-hour steps
+                    less, more = (lambda k=kind[5:]: self.step_time(k, -30)), (lambda k=kind[5:]: self.step_time(k, 30))
+                else:
+                    less, more = (lambda k=kind: self.step(k, -10)), (lambda k=kind: self.step(k, 10))
+                self.button(img, d, (x + colw - 164, y + 20, x + colw - 94, y + 88), "-", less, size=36)
+                self.button(img, d, (x + colw - 84, y + 20, x + colw - 14, y + 88), "+", more, size=36)
                 continue
             self.buttons.append(((x, y, x + colw, y + th), action))
             if kind:  # on/off switch
@@ -2248,14 +2303,18 @@ class App:
                 d.ellipse((kx - 13, sy + 5, kx + 13, sy + 31), fill=(255, 255, 255))
             else:
                 d.text((x + colw - 24, y + th // 2), ">", font=F("bold", 30), fill=MUTED, anchor="rm")
-        for k in range(2):  # page dots
-            cx = W // 2 - 11 + 22 * k
+        for k in range(SETTINGS_PAGES):  # page dots
+            cx = W // 2 - 11 * (SETTINGS_PAGES - 1) + 22 * k
             r = 5 if k == self.settings_page else 4
             d.ellipse((cx - r, 588 - r, cx + r, 588 + r), fill=TEXT if k == self.settings_page else DIM)
         return img
 
     def set_settings_page(self, page):
         self.settings_page = page
+
+    def step_time(self, key, delta):
+        SET[key] = (SET[key] + delta) % (24 * 60)
+        save_settings()
 
     def toggle(self, key):
         SET[key] = not SET.get(key)
@@ -2787,7 +2846,7 @@ class App:
         elif self.mode == "day":
             self.day_index += step  # clamped when drawn
         elif self.mode == "settings":
-            self.settings_page = max(0, min(1, self.settings_page + step))
+            self.settings_page = max(0, min(SETTINGS_PAGES - 1, self.settings_page + step))
         elif self.mode == "themes":
             pages = (len(THEME_ORDER) + 11) // 12
             self.theme_page = max(0, min(pages - 1, self.theme_page + step))
@@ -2813,8 +2872,12 @@ class App:
             night = in_night_window(now, data)
             self.sync_theme(night)
             quiet = night and SET["night_mode"] != "off" and not awake and self.mode == "clock"
+            off_hours = in_screen_off_window(now)
+            dark = off_hours and self.mode == "clock" and mono - last_touch[0] >= SCREEN_OFF_SECS
             animating = False
-            if self.mode == "clock":
+            if dark:
+                self.shown = None  # draw a fresh picture when it wakes
+            elif self.mode == "clock":
                 view = "bedside" if quiet and SET["night_mode"] == "bedside" else self.view
                 key = self.clock_key(now, updated, error, view, mono)
                 if key != self.shown:
@@ -2838,12 +2901,16 @@ class App:
                     self.bright_preview = None
             if self.mode == "ring":  # flash the backlight too
                 level = 100 if int(mono * 2) % 2 == 0 else 25
-            self.bl.set(level)
-            self.dimmed = quiet
+            self.bl.power(not dark)
+            if not dark:
+                self.bl.set(level)
+            self.dimmed = quiet or dark
             now = local_now()
             timeout = 60 - now.second - now.microsecond / 1e6 + 0.05
             if night or self.bright_preview:
                 timeout = min(timeout, 2)
+            if off_hours and not dark and self.mode == "clock":  # go dark on time after the last touch
+                timeout = min(timeout, max(0.2, last_touch[0] + SCREEN_OFF_SECS - time.monotonic()))
             if self.mode != "clock":
                 timeout = min(timeout, 10)
             if self.timer_end is not None:
@@ -2953,6 +3020,8 @@ def preview_ui(folder):
     app.render_alerts().save(p("alerts-forecast.png"))
     app.settings_page = 1
     app.render_settings().save(p("settings-2.png"))
+    app.settings_page = 2
+    app.render_settings().save(p("settings-3.png"))
     log("status check returned %d items" % len(system_status()))
     app.status_info = [  # sample values: screenshots are public, so never show the real network
         ("Version", VERSION), ("IP address", "192.168.1.50"), ("Wi-Fi", "HomeNetwork (82%)"),

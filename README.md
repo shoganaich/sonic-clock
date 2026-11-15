@@ -23,6 +23,8 @@ no keyboard, mouse or desktop, and everything can be changed from the touchscree
 - Kitchen timers: 5, 10, 15 and 25 minutes; the screen flashes when time is up
 - UV and air quality tiles turn orange when levels are high
 - Bedside night mode: a dark amber clock between sunset and sunrise (or fixed hours)
+- Screen off schedule (optional): between two times you choose, the screen goes dark
+  10 seconds after the last touch; touch it to see the clock again
 - 24 themes, plus an optional separate night theme: Midnight, Ocean, Sunset, Forest,
   Graphite, Black, Daylight, Nord, Dracula, Solarized, Rose, Aurora, Amber, Terminal, Paper, Sky,
   Lavender, Coffee, Ember, Indigo, Olive, Copper, Mint and Contrast (high contrast, for reading
@@ -60,13 +62,15 @@ no keyboard, mouse or desktop, and everything can be changed from the touchscree
 
 | Do this | To |
 |---|---|
-| Swipe right on the dashboard, or tap the gear next to the page dots | Open **Settings** (tap **More** or swipe for page 2) |
+| Swipe right on the dashboard, or tap the gear next to the page dots | Open **Settings** (tap **More** or swipe for pages 2 and 3) |
 | Hold a finger on the screen for 2 seconds, then let go | Also opens Settings, from any page |
 | Swipe left or right | Switch between the dashboard, next 24 hours, sea and timer pages |
 | Tap a forecast day | See that day hour by hour (swipe for other days) |
 | Tap the detail tiles | Open the next 24 hours |
 | Tap a warning, rain or timer badge | Open the warning details, the hours or the timer |
 | Tap the screen at night | Show the full dashboard for 30 seconds (the first tap only wakes it) |
+| Tap the dark screen (screen off schedule) | Turn it on; it goes dark again 10 seconds after the last touch (the first tap only wakes it) |
+| Settings → page 3 | Turn the screen off schedule on or off and set its times (half-hour steps) |
 | Tap "Wi-Fi settings" (shown only when offline) | Go straight to the Wi-Fi list |
 | Settings → Power → Shut down or Restart | Turn the clock off or restart it safely |
 
@@ -195,6 +199,8 @@ Everything normally changes from the touchscreen. Settings are stored on the Pad
 | `night_mode` | `bedside` | `bedside`, `dim` (dashboard at night brightness) or `off` |
 | `night_hours` | `sun` | `sun` (sunset to sunrise), `22` or `23` (until 07:00) |
 | `rotate` | `0` | `0` or `180` (upside down) |
+| `screen_off` | `false` | `true` turns the screen off between `off_from` and `off_until` |
+| `off_from` / `off_until` | `1380` / `420` | Minutes after midnight (23:00 / 07:00); the window may cross midnight |
 | `cc`, `regions` | `PT`, Setúbal | Country code and region names used to match official warnings |
 | `sea` | `false` | Sea conditions page |
 | `rain_alerts` | `true` | "Rain in ~N min" badge |
