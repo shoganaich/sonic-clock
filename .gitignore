@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Runtime settings written on the Pad (not part of the source)
+settings.json
+settings.json.tmp
+
+# Local scratch output
+/wcui/
+/preview.png
+
+# Diagnostic reports contain device serial numbers and MAC addresses
+sonicpad-diag*.txt
