@@ -2823,7 +2823,7 @@ def preview_ui(folder):
         {"ssid": "Vodafone Guest", "signal": 41, "secure": False, "active": False, "saved": False},
     ]
     app.saved = {"HomeNetwork": "HomeNetwork"}
-    app.status = "Connected to HomeNetwork (192.168.50.140)"
+    app.status = "Connected to HomeNetwork (192.168.1.50)"
     app.render_wifi().save(p("wifi.png"))
     app.sel = app.nets[1]
     app.start_password()
