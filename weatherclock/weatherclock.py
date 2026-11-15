@@ -53,7 +53,7 @@ REFRESH_OK, REFRESH_FAIL = 600, 60         # seconds between weather fetches
 TOUCH_SWAP_XY = os.environ.get("CLOCK_TOUCH_SWAP_XY") == "1"
 TOUCH_INVERT_X = os.environ.get("CLOCK_TOUCH_INVERT_X") == "1"
 TOUCH_INVERT_Y = os.environ.get("CLOCK_TOUCH_INVERT_Y") == "1"
-VERSION = "1.1.0"                          # bump together with the GitHub Release tag (v1.1.0)
+VERSION = "1.1.1"                          # bump together with the GitHub Release tag (v1.1.1)
 UPDATE_REPO = "shoganaich/sonic-clock"     # GitHub repo whose Releases the Pad can install
 WEB_PORT = 8080                            # phone settings page (only while turned on)
 SWIPE_MIN = 120                            # pixels a finger must travel to count as a swipe
