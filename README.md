@@ -23,8 +23,10 @@ no keyboard, mouse or desktop, and everything can be changed from the touchscree
 - Kitchen timers: 5, 10, 15 and 25 minutes; the screen flashes when time is up
 - UV and air quality tiles turn orange when levels are high
 - Bedside night mode: a dark amber clock between sunset and sunrise (or fixed hours)
-- 16 themes, plus an optional separate night theme: Midnight, Ocean, Sunset, Forest,
-  Graphite, Black, Daylight, Nord, Dracula, Solarized, Rose, Aurora, Amber, Terminal, Paper, Sky
+- 24 themes, plus an optional separate night theme: Midnight, Ocean, Sunset, Forest,
+  Graphite, Black, Daylight, Nord, Dracula, Solarized, Rose, Aurora, Amber, Terminal, Paper, Sky,
+  Lavender, Coffee, Ember, Indigo, Olive, Copper, Mint and Contrast (high contrast, for reading
+  from across the room)
 - Animations (can be turned off): the weather icon moves (turning sun, drifting
   clouds, falling rain and snow, flashing thunder, twinkling stars) and pages slide
   when you swipe. Only the icon's corner of the screen is redrawn, so it costs about
