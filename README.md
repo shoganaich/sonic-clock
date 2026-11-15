@@ -260,7 +260,7 @@ screen to PNG files without touching the display.
 
 ## Credits
 
-Debian on the Sonic Pad comes from [Jpe230/SonicPad-Debian](https://github.com/Jpe230/SonicPad-Debian).
+Huge thanks to [Jpe230](https://github.com/Jpe230) for [SonicPad-Debian](https://github.com/Jpe230/SonicPad-Debian), which makes it possible to run Debian on the Sonic Pad in the first place.
 
 Weather, air quality, marine and place search data by [Open-Meteo.com](https://open-meteo.com/),
 licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Open-Meteo's
