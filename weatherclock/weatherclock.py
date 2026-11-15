@@ -3,17 +3,20 @@
 
 Draws straight to the Linux framebuffer (/dev/fb0) with Pillow, so it needs
 no X server, desktop or extra packages. Weather and air quality come from
-Open-Meteo.
+Open-Meteo; official warnings from MeteoAlarm and the US National Weather Service.
 
   python3 weatherclock.py                  run fullscreen (as root)
   python3 weatherclock.py --preview-ui DIR render every screen to PNGs
 
-Hold a finger on the screen for 2 seconds to open Settings.
+Swipe left or right to move between the dashboard, next 24 hours, sea and timer
+pages. Swipe right on the dashboard, or tap the gear next to the page dots, to
+open Settings.
 """
 
 import hmac
 import html
 import io
+import ipaddress
 import json
 import math
 import os
@@ -92,18 +95,20 @@ def load_settings():
 
 
 SET = load_settings()
+SETTINGS_LOCK = threading.Lock()  # the touchscreen and the phone page can save at the same time
 
 
 def save_settings():
-    try:
-        tmp = SETTINGS_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(SET, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())  # the root filesystem is read/write: survive a power cut
-        os.replace(tmp, SETTINGS_FILE)
-    except OSError as e:
-        log("could not save settings:", e)
+    with SETTINGS_LOCK:
+        try:
+            tmp = SETTINGS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(dict(SET), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())  # the root filesystem is read/write: survive a power cut
+            os.replace(tmp, SETTINGS_FILE)
+        except OSError as e:
+            log("could not save settings:", e)
 
 
 def label_of(options, value):
@@ -1281,7 +1286,8 @@ def install_release(tag):
 
 
 # ---------------------------------------------------------------- phone settings page
-WEB = {"server": None, "pin": "", "tokens": set(), "fails": 0, "locked_until": 0.0}
+WEB = {"server": None, "pin": "", "tokens": set(), "fails": {}}   # fails: {ip: (count, locked_until)}
+WEB_LOCK = threading.Lock()
 WEB_CSS = ("body{font-family:system-ui,sans-serif;background:#10141f;color:#eef1f7;margin:0 auto;"
            "padding:16px;max-width:560px}h1{font-size:22px}label{display:block;margin:14px 0 4px;"
            "color:#8c96aa}select,input[type=number],input[type=text],input[type=password]{width:100%;"
@@ -1297,7 +1303,7 @@ def web_start():
         return
     srv = ThreadingHTTPServer(("0.0.0.0", WEB_PORT), WebHandler)
     srv.daemon_threads = True
-    WEB.update(server=srv, pin="%04d" % secrets.randbelow(10000), tokens=set(), fails=0)
+    WEB.update(server=srv, pin="%04d" % secrets.randbelow(10000), tokens=set(), fails={})
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     log("phone settings page on port", WEB_PORT)
 
@@ -1413,9 +1419,23 @@ def apply_web_place(f):
 
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "SonicClock"
+    timeout = 15  # drop connections that stall instead of holding a thread forever
 
     def log_message(self, fmt, *args):
         pass
+
+    def from_home(self):
+        """Only answer devices on the local network (private, loopback or link-local addresses)."""
+        try:
+            ip = ipaddress.ip_address(self.client_address[0])
+        except ValueError:
+            return False
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return True
+        self.send_response(403)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
 
     def authed(self):
         for part in (self.headers.get("Cookie") or "").split(";"):
@@ -1425,8 +1445,11 @@ class WebHandler(BaseHTTPRequestHandler):
         return False
 
     def form(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > 20000:
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return {}
+        if not 0 < n <= 20000:
             return {}
         body = self.rfile.read(n).decode("utf-8", "replace")
         return {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
@@ -1450,6 +1473,8 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if not self.from_home():
+            return
         url = urllib.parse.urlparse(self.path)
         if not self.authed():
             return self.send_page(login_html(""))
@@ -1459,20 +1484,28 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_page(settings_html("saved" in q))
 
     def do_POST(self):
+        if not self.from_home():
+            return
         url = urllib.parse.urlparse(self.path)
         f = self.form()
         if url.path == "/login":
             now = time.monotonic()
-            if now < WEB["locked_until"]:
+            who = self.client_address[0]
+            token = None
+            with WEB_LOCK:  # several phones can log in at once; each device gets its own lockout
+                count, locked_until = WEB["fails"].get(who, (0, 0.0))
+                locked = now < locked_until
+                if not locked and hmac.compare_digest(f.get("pin", "").encode(), WEB["pin"].encode()):
+                    token = secrets.token_urlsafe(24)
+                    WEB["tokens"].add(token)
+                    WEB["fails"].pop(who, None)
+                elif not locked:
+                    count += 1
+                    WEB["fails"][who] = (0, now + 60) if count >= 5 else (count, 0.0)
+            if locked:
                 return self.send_page(login_html("Too many wrong PINs. Wait a minute and try again."))
-            if hmac.compare_digest(f.get("pin", "").encode(), WEB["pin"].encode()):
-                token = secrets.token_urlsafe(24)
-                WEB["tokens"].add(token)
-                WEB["fails"] = 0
+            if token:
                 return self.redirect("/", "sc=%s; Path=/; HttpOnly; SameSite=Strict" % token)
-            WEB["fails"] += 1
-            if WEB["fails"] >= 5:
-                WEB.update(fails=0, locked_until=now + 60)
             return self.send_page(login_html("Wrong PIN."))
         if not self.authed():
             return self.redirect("/")
