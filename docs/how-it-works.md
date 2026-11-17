@@ -123,9 +123,15 @@ first and then swaps it in, so a power cut can't leave a half-written file.
 ## Updating itself
 
 From Settings → Status & updates → Check for updates, the app asks GitHub for the newest release
-(`latest_release()`). If it's newer than `VERSION`, `install_release()` downloads it,
-checks the new code compiles, keeps a backup of the old file, swaps the new one in and
-restarts the service.
+(`latest_release()`). If it's newer than `VERSION`, `install_release()` downloads it and
+checks the new code compiles. `check_release()` then starts a separate Python that loads
+the new file and runs its `self_test()`, which draws a few screens in memory. Only if that
+works does it keep a backup of the old file, swap the new one in and restart the service.
+
+It also leaves a note, `update-pending.json`, beside the app. Every start counts itself in
+that note (`guard_update()`); once the new version has run for 2 minutes, `confirm_update()`
+deletes it. If the note shows 3 starts that never got that far, the new version keeps
+crashing, so the app copies `weatherclock.py.bak` back and starts the old version again.
 
 ## Previews without the screen
 

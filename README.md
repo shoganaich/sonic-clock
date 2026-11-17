@@ -181,10 +181,18 @@ published as a Release, never unfinished work on `main`.
 To publish a new version:
 
 1. Set `VERSION` near the top of `weatherclock/weatherclock.py` (e.g. `"1.2.0"`) and push.
-2. Create a GitHub Release with the matching tag (`v1.2.0`).
+2. Create a GitHub Release with the matching tag (`v1.2.0`). The tests run again on
+   the tag and fail if it doesn't match `VERSION`; a mismatch would make Pads offer the
+   same update over and over.
 
-The clock downloads that release, checks the code compiles, keeps a backup of the
-old version as `weatherclock.py.bak`, installs it and restarts.
+The clock downloads that release and checks that it starts: it loads the new code in a
+separate Python and draws a few screens with it, without touching the display. Only
+then does it keep a backup of the old version as `weatherclock.py.bak`, install the new
+one and restart. If the new version crashes 3 times in a row before it has run for
+2 minutes, the clock puts the old version back by itself.
+
+These checks are done by the version that is already installed, so they protect
+updates from 1.2.1 onwards.
 
 ### Tests
 

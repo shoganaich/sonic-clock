@@ -9,6 +9,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 install -d /opt/weatherclock
 install -m 755 "$DIR/weatherclock.py" /opt/weatherclock/weatherclock.py
 install -m 644 "$DIR/weatherclock.service" /etc/systemd/system/weatherclock.service
+rm -f /opt/weatherclock/update-pending.json   # a deploy replaces any update still on trial
 
 systemctl disable --now display-sleep.service || true
 systemctl daemon-reload

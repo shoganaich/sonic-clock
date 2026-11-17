@@ -3,6 +3,7 @@ name: Tests
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -31,3 +32,14 @@ jobs:
           python -m pip install "pillow==${{ matrix.pillow }}"
       - name: Run the tests
         run: python -m unittest discover -s tests -t tests -v
+      # Pads compare the Release tag with VERSION in the file they installed: if the two
+      # differ, they offer the same update again and again.
+      - name: Check the tag matches VERSION
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^VERSION = "\([^"]*\)".*/\1/p' weatherclock/weatherclock.py)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION = \"$version\" in weatherclock.py"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches VERSION $version"

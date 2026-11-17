@@ -32,8 +32,10 @@ _tmp = tempfile.mkdtemp(prefix="sonic-clock-tests-")
 def reset():
     """Default settings, no weather, Midnight theme, settings saved to a temporary folder."""
     wc.SETTINGS_FILE = os.path.join(_tmp, "settings.json")
-    if os.path.exists(wc.SETTINGS_FILE):
-        os.remove(wc.SETTINGS_FILE)
+    wc.UPDATE_MARK = os.path.join(_tmp, "update-pending.json")
+    for path in (wc.SETTINGS_FILE, wc.UPDATE_MARK):
+        if os.path.exists(path):
+            os.remove(path)
     wc.SET.clear()
     wc.SET.update(wc.DEFAULTS)
     wc.SET["rotate"] = 0

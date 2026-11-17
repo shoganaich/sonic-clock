@@ -2,10 +2,12 @@
 
 import http.client
 import io
+import json
 import os
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from http.server import ThreadingHTTPServer
@@ -41,16 +43,22 @@ class InstallRelease(unittest.TestCase):
         with open(self.app, "wb") as f:
             f.write(b'VERSION = "1.0.0"\n')
 
-    def install(self, files):
+    def install(self, files, check=None):
         raw = release_tarball(files)
         with mock.patch("urllib.request.urlopen", return_value=FakeResponse(raw)) as urlopen, \
                 mock.patch.object(wc, "__file__", self.app), \
+                mock.patch.object(wc, "check_release", side_effect=check) as checked, \
                 mock.patch.object(wc.subprocess, "run") as run:
             try:
                 wc.install_release("v1.3.0")
             finally:
                 self.url = urlopen.call_args[0][0].full_url
+                self.checked = checked.call_args_list
                 self.ran = run.call_args_list
+
+    def marker(self):
+        with open(wc.UPDATE_MARK) as f:
+            return json.load(f)
 
     def current(self):
         with open(self.app, "rb") as f:
@@ -65,12 +73,23 @@ class InstallRelease(unittest.TestCase):
             self.assertEqual(f.read(), b'VERSION = "1.0.0"\n')
         self.assertTrue(os.access(self.app, os.X_OK))
         self.assertEqual(self.ran, [])  # no service file in the release: systemd untouched
+        self.assertEqual(self.marker(), {"version": "v1.3.0", "starts": 0})
+        self.assertEqual(len(self.checked), 1)
+        self.assertEqual(os.listdir(self.dir), ["weatherclock.py", "weatherclock.py.bak"])  # check file gone
 
     def test_refuses_code_that_does_not_compile(self):
         with self.assertRaises(SyntaxError):
             self.install({"sonic-clock-1.3.0/weatherclock/weatherclock.py": b"def broken(:\n"})
         self.assertEqual(self.current(), b'VERSION = "1.0.0"\n')
         self.assertFalse(os.path.exists(self.app + ".bak"))
+
+    def test_refuses_code_that_fails_its_start_up_check(self):
+        with self.assertRaises(RuntimeError):
+            self.install({"sonic-clock-1.3.0/weatherclock/weatherclock.py": b"x = 1\n"},
+                         check=RuntimeError("the new version fails to start"))
+        self.assertEqual(self.current(), b'VERSION = "1.0.0"\n')
+        self.assertEqual(os.listdir(self.dir), ["weatherclock.py"])
+        self.assertFalse(os.path.exists(wc.UPDATE_MARK))
 
     def test_refuses_a_release_without_the_app(self):
         with self.assertRaises(RuntimeError):
@@ -82,6 +101,94 @@ class InstallRelease(unittest.TestCase):
             self.install({"sonic-clock-1.3.0/weatherclock.py": b"x = 1\n",
                           "sonic-clock-1.3.0/other/weatherclock/weatherclock.py": b"x = 2\n"})
         self.assertEqual(self.current(), b'VERSION = "1.0.0"\n')
+
+
+class CheckRelease(unittest.TestCase):
+    """check_release() runs a real Python, as it does on the Pad."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sonic-clock-check-")
+
+    def candidate(self, code):
+        path = os.path.join(self.dir, "weatherclock-check.py")
+        with open(path, "w") as f:
+            f.write(code)
+        return path
+
+    def test_this_version_passes(self):
+        with open(wc.__file__) as f:
+            wc.check_release(self.candidate(f.read()))
+
+    def test_error_on_import_is_caught(self):
+        with self.assertRaisesRegex(RuntimeError, "NameError"):
+            wc.check_release(self.candidate("VERSION = '9.9.9'\nprint(missing_name)\n"))
+
+    def test_error_while_drawing_is_caught(self):
+        with self.assertRaisesRegex(RuntimeError, "ZeroDivisionError"):
+            wc.check_release(self.candidate("def self_test():\n    1 / 0\n"))
+
+    def test_a_version_without_self_test_only_needs_to_load(self):
+        wc.check_release(self.candidate("VERSION = '9.9.9'\n"))
+
+
+class Rollback(unittest.TestCase):
+    def setUp(self):
+        reset()
+        self.dir = tempfile.mkdtemp(prefix="sonic-clock-rollback-")
+        self.app = os.path.join(self.dir, "weatherclock.py")
+        for path, text in ((self.app, b"new"), (self.app + ".bak", b"old")):
+            with open(path, "wb") as f:
+                f.write(text)
+
+    def start(self):
+        with mock.patch.object(wc, "__file__", self.app), mock.patch.object(wc.os, "execv") as execv:
+            on_trial = wc.guard_update()
+        with open(self.app, "rb") as f:
+            return on_trial, f.read(), execv.call_args
+
+    def mark(self, starts):
+        with open(wc.UPDATE_MARK, "w") as f:
+            json.dump({"version": "v1.3.0", "starts": starts}, f)
+
+    def test_no_update_pending(self):
+        self.assertEqual(self.start(), (False, b"new", None))
+
+    def test_the_first_starts_are_on_trial(self):
+        self.mark(0)
+        for _ in range(wc.UPDATE_TRIES):
+            self.assertEqual(self.start(), (True, b"new", None))
+        with open(wc.UPDATE_MARK) as f:
+            self.assertEqual(json.load(f)["starts"], wc.UPDATE_TRIES)
+
+    def test_goes_back_after_too_many_starts(self):
+        self.mark(wc.UPDATE_TRIES)
+        on_trial, code, execv = self.start()
+        self.assertEqual(code, b"old")
+        self.assertFalse(os.path.exists(wc.UPDATE_MARK))
+        self.assertEqual(execv[0][1][-1], self.app)  # restarted on the old version
+
+    def test_keeps_the_new_version_without_a_backup(self):
+        os.remove(self.app + ".bak")
+        self.mark(wc.UPDATE_TRIES)
+        self.assertEqual(self.start(), (False, b"new", None))
+        self.assertFalse(os.path.exists(wc.UPDATE_MARK))
+
+    def test_confirm_update(self):
+        self.mark(1)
+        wc.confirm_update()
+        self.assertFalse(os.path.exists(wc.UPDATE_MARK))
+        wc.confirm_update()  # nothing pending: no error
+
+    def test_run_loop_confirms_after_the_trial(self):
+        self.mark(1)
+        app = wc.App(None, mock.Mock())
+        app.trial_until = time.monotonic() - 1
+        app.show = mock.Mock()
+        with mock.patch.object(wc.events, "get", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                app.run()
+        self.assertFalse(os.path.exists(wc.UPDATE_MARK))
+        self.assertIsNone(app.trial_until)
 
 
 class PhonePage(unittest.TestCase):

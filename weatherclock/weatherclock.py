@@ -57,6 +57,8 @@ TOUCH_INVERT_X = os.environ.get("CLOCK_TOUCH_INVERT_X") == "1"
 TOUCH_INVERT_Y = os.environ.get("CLOCK_TOUCH_INVERT_Y") == "1"
 VERSION = "1.2.0"                          # bump together with the GitHub Release tag (v1.2.0)
 UPDATE_REPO = "shoganaich/sonic-clock"     # GitHub repo whose Releases the Pad can install
+UPDATE_TRIES = 3                           # starts an update gets before the old version is put back
+UPDATE_OK_SECS = 120                       # running this long after an update means it works
 WEB_PORT = 8080                            # phone settings page (only while turned on)
 SWIPE_MIN = 120                            # pixels a finger must travel to count as a swipe
 TIMER_CHOICES = (5, 10, 15, 25)            # minutes
@@ -70,6 +72,7 @@ def log(*a):
 
 # ---------------------------------------------------------------- saved settings
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+UPDATE_MARK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update-pending.json")
 DEFAULTS = {
     "theme": "Midnight",
     "place": "Sines, Portugal",
@@ -1325,6 +1328,13 @@ def install_release(tag):
         raise RuntimeError("weatherclock.py is missing from release %s" % tag)
     compile(code, "weatherclock.py", "exec")  # refuse a broken file
     here = os.path.abspath(__file__)
+    candidate = os.path.join(os.path.dirname(here), "weatherclock-check.py")
+    with open(candidate, "wb") as f:
+        f.write(code)
+    try:
+        check_release(candidate)
+    finally:
+        os.remove(candidate)
     shutil.copy2(here, here + ".bak")
     write_atomic(here, code, 0o755)
     unit = "/etc/systemd/system/weatherclock.service"
@@ -1338,8 +1348,64 @@ def install_release(tag):
         if svc != old:
             write_atomic(unit, svc, 0o644)
             subprocess.run(["systemctl", "daemon-reload"], timeout=30)
+    write_atomic(UPDATE_MARK, json.dumps({"version": tag, "starts": 0}).encode(), 0o644)
     os.sync()
     log("installed release", tag)
+
+
+def check_release(path):
+    """Load a downloaded weatherclock.py in a separate Python and let it draw a few screens.
+
+    Catches releases that compile but fail on start (a missing name, a Pillow feature
+    the Pad lacks) before they replace the working version."""
+    script = ("import importlib.util, sys\n"
+              "spec = importlib.util.spec_from_file_location('candidate', sys.argv[1])\n"
+              "mod = importlib.util.module_from_spec(spec)\n"
+              "spec.loader.exec_module(mod)\n"
+              "getattr(mod, 'self_test', lambda: None)()\n")
+    try:
+        r = subprocess.run([sys.executable, "-c", script, path], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("the new version did not finish its start-up check")
+    if r.returncode:
+        lines = r.stderr.strip().splitlines()
+        raise RuntimeError("the new version fails to start: " + (lines[-1] if lines else "exit %d" % r.returncode))
+
+
+def guard_update():
+    """Count starts after an update, and go back to the previous version if the new one
+    keeps crashing. Returns True while the update is still on trial."""
+    try:
+        with open(UPDATE_MARK) as f:
+            mark = json.load(f)
+    except (OSError, ValueError):
+        return False
+    mark["starts"] = mark.get("starts", 0) + 1
+    if mark["starts"] <= UPDATE_TRIES:
+        write_atomic(UPDATE_MARK, json.dumps(mark).encode(), 0o644)
+        return True
+    os.remove(UPDATE_MARK)
+    here = os.path.abspath(__file__)
+    try:
+        with open(here + ".bak", "rb") as f:
+            old = f.read()
+    except OSError:
+        log("update %s keeps failing and there is no backup to go back to" % mark.get("version"))
+        return False
+    log("update %s failed to start %d times: going back to the previous version"
+        % (mark.get("version"), UPDATE_TRIES))
+    write_atomic(here, old, 0o755)
+    os.sync()
+    os.execv(sys.executable, [sys.executable, "-u", here])
+
+
+def confirm_update():
+    """The updated clock has run long enough: keep it."""
+    try:
+        os.remove(UPDATE_MARK)
+        log("update confirmed")
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- phone settings page
@@ -1830,6 +1896,7 @@ class App:
         self.last_frame, self.last_shift = None, (0, 0)
         self.anim_frame = None
         self.slid = False             # a slide already drew the new screen
+        self.trial_until = None       # after an update: keep it once it has run until then
 
     # ---- drawing helpers
     def button(self, img, d, box, label, action, primary=False, size=24, fill=None):
@@ -2862,6 +2929,9 @@ class App:
             mono = time.monotonic()
             with lock:
                 data, updated, error = state["data"], state["updated"], state["error"]
+            if self.trial_until and mono >= self.trial_until:
+                confirm_update()
+                self.trial_until = None
             if self.timer_end is not None and mono >= self.timer_end:
                 self.start_ring()
             if self.mode == "ring" and mono > self.ring_until:
@@ -2937,6 +3007,16 @@ class App:
 
 
 # ---------------------------------------------------------------- previews
+def self_test():
+    """Draw the main screens without the display, touch panel or network.
+    An older version runs this on a downloaded update before installing it."""
+    now = local_now()
+    app = App(None, None)
+    app.render_view(now, None, None, None)
+    app.render_settings()
+    render_bedside(now, None)
+
+
 def preview_ui(folder):
     os.makedirs(folder, exist_ok=True)
     now = local_now()
@@ -3055,6 +3135,7 @@ def main():
     if "--preview-ui" in sys.argv:
         preview_ui(sys.argv[sys.argv.index("--preview-ui") + 1])
         return
+    on_trial = guard_update()
     fb = Framebuffer()
     bl = Backlight()
     bl.on()
@@ -3065,7 +3146,10 @@ def main():
             web_start()
         except OSError as e:
             log("phone settings page failed:", e)
-    App(fb, bl).run()
+    app = App(fb, bl)
+    if on_trial:
+        app.trial_until = time.monotonic() + UPDATE_OK_SECS
+    app.run()
 
 
 if __name__ == "__main__":
