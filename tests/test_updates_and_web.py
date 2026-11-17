@@ -75,7 +75,7 @@ class InstallRelease(unittest.TestCase):
         self.assertEqual(self.ran, [])  # no service file in the release: systemd untouched
         self.assertEqual(self.marker(), {"version": "v1.3.0", "starts": 0})
         self.assertEqual(len(self.checked), 1)
-        self.assertEqual(os.listdir(self.dir), ["weatherclock.py", "weatherclock.py.bak"])  # check file gone
+        self.assertEqual(sorted(os.listdir(self.dir)), ["weatherclock.py", "weatherclock.py.bak"])  # check file gone
 
     def test_refuses_code_that_does_not_compile(self):
         with self.assertRaises(SyntaxError):
