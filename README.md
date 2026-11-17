@@ -186,6 +186,21 @@ To publish a new version:
 The clock downloads that release, checks the code compiles, keeps a backup of the
 old version as `weatherclock.py.bak`, installs it and restarts.
 
+### Tests
+
+The tests run on any computer with Python 3.9 or newer and Pillow; they need no Pad,
+screen or network:
+
+```bash
+python3 -m unittest discover -s tests -t tests
+```
+
+They check the weather and warning logic, the screen-off and night hours, touch
+mapping, settings validation, the phone settings page, the updater, and that every
+screen still renders. GitHub runs them on every push and pull request, once with
+Python 3.9 and Pillow 8.1.2 (what the Pad has) and once with current versions. Run
+them before publishing a Release.
+
 ## Configuration
 
 Everything normally changes from the touchscreen. Settings are stored on the Pad in
@@ -267,6 +282,9 @@ scripts/
   deploy.sh              deploy from Linux / macOS
 tools/
   sonicpad-diagnose.sh   read-only hardware report
+tests/                   unit and screen tests (python3 -m unittest discover -s tests -t tests)
+.github/workflows/
+  tests.yml              runs the tests on GitHub
 docs/
   hardware.md            what was found about the Sonic Pad's display, touch and Wi-Fi
   how-it-works.md        plain-language tour of how the app draws, reads touch and updates

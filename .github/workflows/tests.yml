@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # What the Sonic Pad runs: Debian 11 ships Python 3.9 and Pillow 8.1.2
+          - python: "3.9"
+            pillow: "8.1.2"
+          # A current setup, as on a development machine
+          - python: "3.13"
+            pillow: "11.3.0"
+    name: Python ${{ matrix.python }}, Pillow ${{ matrix.pillow }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the Pad's fonts and Pillow
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-nanum fonts-dejavu-core
+          python -m pip install "pillow==${{ matrix.pillow }}"
+      - name: Run the tests
+        run: python -m unittest discover -s tests -t tests -v

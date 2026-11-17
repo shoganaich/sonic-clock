@@ -1259,8 +1259,12 @@ def system_status():
         if len(p) >= 2 and p[0] == "*":
             signal = " (%s%%)" % p[1]
 
+    def read(path):
+        with open(path) as f:
+            return f.read()
+
     def uptime():
-        s = int(float(open("/proc/uptime").read().split()[0]))
+        s = int(float(read("/proc/uptime").split()[0]))
         d, h, m = s // 86400, s // 3600 % 24, s // 60 % 60
         return ("%d d %d h" % (d, h)) if d else ("%d h %d min" % (h, m))
 
@@ -1269,12 +1273,12 @@ def system_status():
         return "%.1f GB free of %.1f GB" % (st.f_bavail * st.f_frsize / 1e9, st.f_blocks * st.f_frsize / 1e9)
 
     def memory():
-        info = dict(l.split(":", 1) for l in open("/proc/meminfo").read().splitlines() if ":" in l)
+        info = dict(l.split(":", 1) for l in read("/proc/meminfo").splitlines() if ":" in l)
         kb = lambda k: int(info[k].split()[0])
         return "%d MB free of %d MB" % (kb("MemAvailable") // 1024, kb("MemTotal") // 1024)
 
     def cpu_temp():
-        return "%d°C" % round(int(open("/sys/class/thermal/thermal_zone0/temp").read()) / 1000)
+        return "%d°C" % round(int(read("/sys/class/thermal/thermal_zone0/temp")) / 1000)
 
     with lock:
         upd, err = state["updated"], state["error"]
