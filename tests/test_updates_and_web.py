@@ -99,7 +99,8 @@ class InstallRelease(unittest.TestCase):
     def test_ignores_files_outside_the_app_folder(self):
         with self.assertRaises(RuntimeError):
             self.install({"sonic-clock-1.3.0/weatherclock.py": b"x = 1\n",
-                          "sonic-clock-1.3.0/other/weatherclock/weatherclock.py": b"x = 2\n"})
+                          "sonic-clock-1.3.0/tools/weatherclock.py": b"x = 2\n",
+                          "sonic-clock-1.3.0/other/weatherclock/weatherclock.py": b"x = 3\n"})
         self.assertEqual(self.current(), b'VERSION = "1.0.0"\n')
 
 

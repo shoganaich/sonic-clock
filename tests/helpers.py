@@ -39,6 +39,8 @@ def reset():
     wc.SET.clear()
     wc.SET.update(wc.DEFAULTS)
     wc.SET["rotate"] = 0
+    wc.TOUCH_SWAP_XY = wc.TOUCH_INVERT_X = wc.TOUCH_INVERT_Y = False  # ignore CLOCK_TOUCH_* here
+    wc.last_touch[0] = 0.0
     wc.state.update(data=None, updated=None, error=None)
     wc.WEB.update(server=None, pin="", tokens=set(), fails={})
     wc.refresh_now.clear()

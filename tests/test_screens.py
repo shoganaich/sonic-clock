@@ -6,12 +6,13 @@ import io
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from PIL import Image
 
-from helpers import ROOT, reset, sample_data, sample_sea, wc
+from helpers import ROOT, fixed_now, reset, sample_data, sample_sea, wc
 
 PLACES = {"results": [
     {"id": 2267057, "name": "Lisbon", "admin1": "Lisbon", "admin2": "Lisboa", "country": "Portugal",
@@ -43,6 +44,7 @@ class Screens(unittest.TestCase):
         reset()
         cls.out = tempfile.mkdtemp(prefix="sonic-clock-screens-")
         with mock.patch.object(wc, "fetch", side_effect=fake_fetch), \
+                mock.patch.object(wc, "local_now", fixed_now), \
                 mock.patch.object(wc, "nm", return_value=(1, "", "nmcli not available")), \
                 contextlib.redirect_stdout(io.StringIO()):
             wc.preview_ui(cls.out)
@@ -78,6 +80,9 @@ class Screens(unittest.TestCase):
 class Taps(unittest.TestCase):
     def setUp(self):
         reset()
+        patcher = mock.patch.object(wc, "local_now", fixed_now)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.now = wc.local_now()
         self.data = sample_data(self.now)
         wc.state.update(data=self.data, updated=self.now)
@@ -108,6 +113,69 @@ class Taps(unittest.TestCase):
                 self.app.settings_page = page
                 self.assertEqual(self.app.render_settings().size, (wc.W, wc.H))
                 self.assertTrue(self.app.buttons)
+
+
+class MainLoop(unittest.TestCase):
+    """One pass of App.run(), stopped when it waits for the next touch."""
+
+    def setUp(self):
+        reset()
+        patcher = mock.patch.object(wc, "local_now", fixed_now)  # 14:37, daytime
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.now = fixed_now()
+        wc.state.update(data=sample_data(self.now), updated=self.now)
+        self.bl = mock.Mock()
+        self.fb = mock.Mock()
+        self.app = wc.App(self.fb, self.bl)
+        self.app.show = mock.Mock()
+
+    def run_once(self):
+        with mock.patch.object(wc.events, "get", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.app.run()
+
+    def test_draws_the_dashboard_at_day_brightness(self):
+        self.run_once()
+        self.app.show.assert_called_once()
+        self.bl.power.assert_called_with(True)
+        self.bl.set.assert_called_with(wc.SET["day_bright"])
+
+    def test_finished_timer_rings(self):
+        self.app.start_timer(5)
+        self.app.timer_end = time.monotonic() - 1
+        self.run_once()
+        self.assertEqual(self.app.mode, "ring")
+        self.assertIsNone(self.app.timer_end)
+
+    def test_running_timer_does_not_ring_yet(self):
+        self.app.start_timer(5)
+        self.run_once()
+        self.assertEqual(self.app.mode, "clock")
+        self.assertIsNotNone(self.app.timer_end)
+
+    def test_settings_return_to_the_clock_when_idle(self):
+        self.app.mode = "settings"
+        self.app.last_input = time.monotonic() - wc.IDLE_SECS - 1
+        self.run_once()
+        self.assertEqual(self.app.mode, "clock")
+
+    def test_settings_stay_open_while_in_use(self):
+        self.app.mode = "settings"
+        self.run_once()
+        self.assertEqual(self.app.mode, "settings")
+
+    def test_screen_goes_dark_in_the_screen_off_hours(self):
+        wc.SET.update(screen_off=True, off_from=14 * 60, off_until=15 * 60)
+        self.run_once()
+        self.bl.power.assert_called_with(False)
+        self.app.show.assert_not_called()
+
+    def test_a_recent_touch_keeps_the_screen_on(self):
+        wc.SET.update(screen_off=True, off_from=14 * 60, off_until=15 * 60)
+        wc.last_touch[0] = time.monotonic()
+        self.run_once()
+        self.bl.power.assert_called_with(True)
 
 
 if __name__ == "__main__":

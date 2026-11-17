@@ -119,6 +119,20 @@ class Forecast(unittest.TestCase):
         levels = [a["level"] for a in wc.forecast_alerts(self.data, self.now)]
         self.assertEqual(levels, sorted(levels, reverse=True))
 
+    def gust_level(self, gust):
+        self.data["daily"]["wind_gusts_10m_max"][0] = gust
+        found = [a["level"] for a in wc.forecast_alerts(self.data, self.now) if a["title"] == "Strong wind"]
+        return found[0] if found else 1
+
+    def test_wind_thresholds_are_exact(self):
+        self.assertEqual([self.gust_level(g) for g in (69.9, 70, 89.9, 90, 109.9, 110)], [1, 2, 2, 3, 3, 4])
+
+    def test_thunder_with_hail_is_orange(self):
+        for code, level in ((95, 2), (96, 3), (99, 3)):
+            self.data["daily"]["weather_code"][0] = code
+            alerts = {a["title"]: a["level"] for a in wc.forecast_alerts(self.data, self.now)}
+            self.assertEqual(alerts.get("Thunderstorms"), level, code)
+
     def test_active_alerts_prefers_official(self):
         self.data["alerts"] = [{"level": 2, "title": "Yellow Wind", "detail": "", "start": None, "end": None}]
         self.data["alerts_source"] = "MeteoAlarm"
@@ -149,8 +163,9 @@ class Forecast(unittest.TestCase):
         found = wc.tides(sample_sea(self.now), start, hours=30)
         kinds = [k for k, _, _ in found]
         self.assertEqual(kinds, ["High", "Low", "High", "Low", "High"])
-        first_high = start + timedelta(hours=12.42 / 4)   # sine wave peaks a quarter period in
-        self.assertLess(abs((found[0][1] - first_high).total_seconds()), 15 * 60)
+        for n, (kind, when, _) in enumerate(found):  # sine wave: peaks every half period from a quarter in
+            true = start + timedelta(hours=12.42 / 4 + n * 12.42 / 2)
+            self.assertLess(abs((when - true).total_seconds()), 3 * 60, "%s tide %d" % (kind, n))
         self.assertEqual(wc.tides(None, self.now), [])
 
 
@@ -183,6 +198,7 @@ class OfficialWarnings(unittest.TestCase):
             self.warning("Setúbal", 2, -30, -2, event="Expired"),
             self.warning("Setúbal", 2, 72, 80, event="Too far ahead"),
             self.warning("Setúbal", 2, 10, 20, event="Yellow Coastal"),
+            self.warning("Setúbal", 2, 10, 20, event="Yellow Coastal"),     # same warning, sent twice
         ]}
         with mock.patch.object(wc, "fetch", return_value=feed) as fetch:
             alerts, source = wc.official_alerts()
@@ -211,11 +227,56 @@ class OfficialWarnings(unittest.TestCase):
         self.assertEqual((alerts[0]["title"], alerts[0]["level"], source),
                          ("Winter Storm Warning", 3, "US National Weather Service"))
 
+    def test_to_local(self):
+        self.assertEqual(wc.to_local("2026-06-15T12:00:00Z"), datetime(2026, 6, 15, 13, 0))  # Lisbon, summer
+        self.assertEqual(wc.to_local("2026-01-15T12:00:00+02:00"), datetime(2026, 1, 15, 10, 0))
+        self.assertEqual(wc.to_local("2026-06-15T12:00"), datetime(2026, 6, 15, 12, 0))   # already local
+        self.assertIsNone(wc.to_local(""))
+        self.assertIsNone(wc.to_local("soon"))
+
     def test_no_official_source(self):
         wc.SET["cc"] = "BR"
         with mock.patch.object(wc, "fetch") as fetch:
             self.assertEqual(wc.official_alerts(), (None, ""))
         fetch.assert_not_called()
+
+
+class PlaceSearch(unittest.TestCase):
+    def setUp(self):
+        reset()
+
+    def place(self, id, name, cc, pop, admin1="", country=None):
+        return {"id": id, "name": name, "admin1": admin1, "country": country or cc, "country_code": cc,
+                "latitude": 1.0, "longitude": 2.0, "timezone": "Europe/Lisbon", "population": pop}
+
+    def test_merges_languages_portugal_first(self):
+        english = [self.place(1, "Lisbon", "PT", 500000, "Lisbon", "Portugal"),
+                   self.place(2, "Lisbon", "US", 9000, "Maine", "United States")]
+        portuguese = [self.place(1, "Lisboa", "PT", 500000, "Lisboa", "Portugal"),   # same place, same id
+                      self.place(3, "Lisbon", "US", 3000, "Maine", "United States")]  # same label as id 2
+        urls = []
+
+        def fetch(url):
+            urls.append(url)
+            return {"results": english if "language=en" in url else portuguese}
+
+        with mock.patch.object(wc, "fetch", side_effect=fetch):
+            found = wc.geocode("São Paulo")
+        self.assertEqual(len(urls), 2)
+        self.assertTrue(all("name=S%C3%A3o%20Paulo" in u for u in urls))
+        self.assertEqual([p["label"] for p in found], ["Lisbon, Lisbon, Portugal", "Lisbon, Maine, United States"])
+        self.assertEqual(found[0]["cc"], "PT")
+        self.assertEqual(found[0]["regions"], ["Lisbon"])
+
+    def test_bigger_places_first_and_at_most_five(self):
+        many = [self.place(i, "Town%d" % i, "ES", i * 100) for i in range(1, 9)]
+        with mock.patch.object(wc, "fetch", return_value={"results": many}):
+            found = wc.geocode("Town")
+        self.assertEqual([p["name"] for p in found], ["Town8", "Town7", "Town6", "Town5", "Town4"])
+
+    def test_no_results(self):
+        with mock.patch.object(wc, "fetch", return_value={}):
+            self.assertEqual(wc.geocode("Nowhere"), [])
 
 
 class Touch(unittest.TestCase):
