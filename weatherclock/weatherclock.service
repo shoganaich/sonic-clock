@@ -1,5 +1,5 @@
 [Unit]
-Description=Sines weather clock on the Sonic Pad screen
+Description=Sonic Clock: weather clock on the Sonic Pad screen
 After=network.target
 
 [Service]
