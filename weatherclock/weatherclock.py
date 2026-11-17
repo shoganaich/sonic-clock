@@ -55,7 +55,7 @@ REFRESH_OK, REFRESH_FAIL = 600, 60         # seconds between weather fetches
 TOUCH_SWAP_XY = os.environ.get("CLOCK_TOUCH_SWAP_XY") == "1"
 TOUCH_INVERT_X = os.environ.get("CLOCK_TOUCH_INVERT_X") == "1"
 TOUCH_INVERT_Y = os.environ.get("CLOCK_TOUCH_INVERT_Y") == "1"
-VERSION = "1.2.0"                          # bump together with the GitHub Release tag (v1.2.0)
+VERSION = "1.2.1"                          # bump together with the GitHub Release tag (v1.2.1)
 UPDATE_REPO = "shoganaich/sonic-clock"     # GitHub repo whose Releases the Pad can install
 UPDATE_TRIES = 3                           # starts an update gets before the old version is put back
 UPDATE_OK_SECS = 120                       # running this long after an update means it works
